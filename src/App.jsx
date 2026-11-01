@@ -1,5 +1,26 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Coins, Flower, Wind, ChevronRight, Eye, Info, ArrowUpDown, ShieldAlert, Sparkles, RefreshCw, Trophy, Users, Check, Ban, Layers, Brain, AlertCircle, HelpCircle } from 'lucide-react';
+import {
+  Coins,
+  Flower,
+  ChevronRight,
+  Eye,
+  Info,
+  ArrowUpDown,
+  Sparkles,
+  RefreshCw,
+  Trophy,
+  Users,
+  Check,
+  Ban,
+  Brain,
+  AlertCircle,
+  RotateCcw,
+  RotateCw,
+  Lock,
+  Calculator,
+  ChevronDown,
+  ChevronUp
+} from 'lucide-react';
 
 // --- 常量与牌库定义 ---
 const SUITS = ['万', '筒', '条'];
@@ -29,7 +50,7 @@ const ROLES_INFO = {
     activeName: '千术 (1币)',
     activeDesc: '查看牌山顶端的3张牌，将其中1张直接收入手牌，其余2张按任意顺序放回牌山顶或牌山底。',
     passiveName: '步步生花',
-    passiveDesc: '手中花牌数量大于4时触发：轮到老千的轮次时，可选择消耗1张花牌换取额外的抽牌打牌机会。'
+    passiveDesc: '手中花牌数量大于4时触发：轮到老千的轮次时，可选择消耗1张花牌换取额外的抽牌打牌机会（可连续触发）。'
   },
   '麦咭': {
     name: '麦咭',
@@ -51,7 +72,7 @@ const ROLES_INFO = {
     activeName: '乘风 (1币)',
     activeDesc: '无视上下家，当场上任意玩家打出一张牌时，灵风可以选择吃牌并跳转到灵风的轮次。',
     passiveName: '北风，北北风',
-    passiveDesc: '灵风抽取的每一张北风牌可以算作 1 张花牌。'
+    passiveDesc: '灵风抽取的每一张北风牌自动算作 1 张花牌（自动置入花牌区并补牌）。'
   },
   '典当师': {
     name: '典当师',
@@ -63,6 +84,17 @@ const ROLES_INFO = {
     activeDesc: '在出牌阶段使用。声明一种花色（万、筒、条）。下个回合开始前，全场禁止打出/胡/作为副露亮出该花色的牌（除非无其他牌可打）。',
     passiveName: '繁花似锦',
     passiveDesc: '手中的每一组暗刻和每一个技能币都额外算作 1 张花牌。'
+  },
+  '阿姨': {
+    name: '阿姨',
+    title: '牌桌统治者',
+    color: 'from-rose-500 to-orange-600',
+    border: 'border-rose-500',
+    text: 'text-rose-400',
+    activeName: '闲人免进 (1币) / 风水轮流转 (1币)',
+    activeDesc: '【闲人免进】指定当前下家1巡禁止任何行动（禁响应、跳过摸打）；【风水轮流转】转换本局游戏的出牌顺序（顺时针⇄逆时针）。',
+    passiveName: '神机妙算',
+    passiveDesc: '开局自带记牌器，系统自动记录并实时展示每张牌剩下的未知数量。'
   }
 };
 
@@ -83,7 +115,6 @@ const generatePureRandomDeck = () => {
   for (let f of FLOWERS) {
     deck.push(`花-${f}`);
   }
-  // 标准 Fisher-Yates 纯随机打乱
   for (let i = deck.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [deck[i], deck[j]] = [deck[j], deck[i]];
@@ -91,8 +122,12 @@ const generatePureRandomDeck = () => {
   return deck;
 };
 
-const isFlowerTile = (tile) => {
-  return DRAGONS.includes(tile) || tile.startsWith('花-');
+// 判断是否为花牌（灵风抽到的「北风」直接视作花牌自动进花牌区并补牌）
+const isFlowerTile = (tile, role = null) => {
+  if (!tile) return false;
+  if (DRAGONS.includes(tile) || tile.startsWith('花-')) return true;
+  if (role === '灵风' && tile === '北风') return true;
+  return false;
 };
 
 const getTileSuit = (tile) => {
@@ -115,15 +150,15 @@ const sortHandTiles = (hand) => {
   return [...hand].sort((a, b) => getTileSortWeight(a) - getTileSortWeight(b));
 };
 
-// 抽牌并自动补花（同时记录灵风抽取过的北风牌）
-const drawAndResolveFlowers = (deck, count) => {
+// 抽牌并自动补花（支持灵风自动将抽取的北风放入花牌区并补牌）
+const drawAndResolveFlowers = (deck, count, role = null) => {
   let currentDeck = [...deck];
   let drawnHand = [];
   let drawnFlowers = [];
 
   while (drawnHand.length < count && currentDeck.length > 0) {
     const tile = currentDeck.shift();
-    if (isFlowerTile(tile)) {
+    if (isFlowerTile(tile, role)) {
       drawnFlowers.push(tile);
     } else {
       drawnHand.push(tile);
@@ -132,28 +167,29 @@ const drawAndResolveFlowers = (deck, count) => {
   return { drawnHand, drawnFlowers, remainingDeck: currentDeck };
 };
 
-// 计算某玩家当前总有效花牌数（严格按最新技能规则拆解）
+// 计算某玩家当前总有效花牌数
 const getFlowerBreakdown = (player) => {
   const baseFlowers = player.flowerTiles.length;
   const mingGangCount = player.melds.filter(m => m.type === 'minggang').length;
   let bonus = 0;
-  let details = [`实体花牌: ${baseFlowers}`];
+  let details = [];
+
+  if (player.role === '灵风') {
+    const northInFlowers = player.flowerTiles.filter(t => t === '北风').length;
+    const normalFlowers = baseFlowers - northInFlowers;
+    details.push(`常规花牌: ${normalFlowers}`);
+    if (northInFlowers > 0) details.push(`北风花牌: +${northInFlowers}`);
+  } else {
+    details.push(`实体花牌: ${baseFlowers}`);
+  }
+
   if (mingGangCount > 0) details.push(`明杠: +${mingGangCount}`);
 
   if (player.role === '麦咭') {
     const meldBonus = player.melds.length * 0.5;
     bonus += meldBonus;
     if (meldBonus > 0) details.push(`花团锦簇(副露): +${meldBonus}`);
-  } else if (player.role === '灵风') {
-    // 灵风抽取的每一张北风牌算作1张花牌（包含手牌、副露、以及自己摸到后打出的北风）
-    const handNorth = player.hand.filter(t => t === '北风').length;
-    const meldNorth = player.melds.reduce((acc, m) => acc + m.tiles.filter(t => t === '北风').length, 0);
-    const discardNorth = (player.discards || []).filter(t => t === '北风').length;
-    const northBonus = handNorth + meldNorth + discardNorth;
-    bonus += northBonus;
-    if (northBonus > 0) details.push(`北风加成: +${northBonus}`);
   } else if (player.role === '典当师') {
-    // 最新规则：手中的每一组暗刻和每一个技能币都额外算作1张花牌（已移除「发」的额外加成）
     const coinBonus = player.coins;
     const counts = {};
     player.hand.forEach(t => counts[t] = (counts[t] || 0) + 1);
@@ -163,7 +199,6 @@ const getFlowerBreakdown = (player) => {
     if (anKeBonus > 0) details.push(`暗刻加成: +${anKeBonus}`);
   }
 
-  // 解决 0.5 浮点数精度问题
   const rawTotal = Math.round((baseFlowers + mingGangCount + bonus) * 10) / 10;
 
   return {
@@ -206,7 +241,6 @@ const canFormSets = (tiles) => {
 
 // 仅判断牌型本身是否满足 3x4+2 或 七小对
 const isPureMahjongWinPattern = (handTiles, meldCount) => {
-  // 1. 七小对判定 (必须门前清，无副露，14张牌，支持龙七对即4张相同算2对)
   if (meldCount === 0 && handTiles.length === 14) {
     const counts = {};
     handTiles.forEach(t => counts[t] = (counts[t] || 0) + 1);
@@ -214,7 +248,6 @@ const isPureMahjongWinPattern = (handTiles, meldCount) => {
     if (isSevenPairs) return { valid: true, patternName: '七小对' };
   }
 
-  // 2. 标准 3x4 + 2 判定（手牌数 + 副露数*3 必须严格等于 14）
   if (handTiles.length + meldCount * 3 !== 14) {
     return { valid: false };
   }
@@ -239,13 +272,11 @@ const checkCanHu = (player, extraTile = null, bannedSuitInfo = null) => {
   const allHand = extraTile ? [...player.hand, extraTile] : [...player.hand];
   const meldCount = player.melds.length;
 
-  // 第一步：检查牌型是否成型
   const patternRes = isPureMahjongWinPattern(allHand, meldCount);
   if (!patternRes.valid) {
     return { canHu: false, lockedReason: null };
   }
 
-  // 第二步：检查典当师《售罄》禁胡限制（“全场所有玩家禁止打出/胡/作为副露亮出该花色的牌”）
   const targetHuTile = extraTile || player.hand[player.hand.length - 1];
   if (bannedSuitInfo && bannedSuitInfo.ownerId !== player.id && targetHuTile) {
     const huTileSuit = getTileSuit(targetHuTile);
@@ -257,7 +288,6 @@ const checkCanHu = (player, extraTile = null, bannedSuitInfo = null) => {
     }
   }
 
-  // 第三步：检查 4花解锁碰牌限制（如果副露中有碰牌，则必须满4花才可胡牌）
   const hasPeng = player.melds.some(m => m.type === 'peng');
   const { total: totalFlowers } = getFlowerBreakdown(player);
   if (hasPeng && Math.round(totalFlowers * 10) < 40) {
@@ -274,12 +304,12 @@ const checkCanHu = (player, extraTile = null, bannedSuitInfo = null) => {
   return { canHu: true, type: typeLabel, lockedReason: null };
 };
 
-// 计算玩家当前听哪些牌（用于实时听牌提示器，帮助玩家清楚掌握胡牌条件）
+// 计算玩家当前听哪些牌
 const getTingTiles = (player, bannedSuitInfo = null) => {
-  // 当手牌数为 13 - melds*3 时，直接计算听哪些牌
   if (player.hand.length + player.melds.length * 3 !== 13) return [];
   const tingList = [];
   for (let candidate of ALL_PLAYABLE_TILES) {
+    if (player.role === '灵风' && candidate === '北风') continue; // 灵风北风自动补花
     const patternRes = isPureMahjongWinPattern([...player.hand, candidate], player.melds.length);
     if (patternRes.valid) {
       const fullCheck = checkCanHu(player, candidate, bannedSuitInfo);
@@ -297,7 +327,7 @@ const getTingTiles = (player, bannedSuitInfo = null) => {
 const getValidChiCombinations = (hand, discardedTile, bannedSuit) => {
   const suit = getTileSuit(discardedTile);
   if (!SUITS.includes(suit)) return [];
-  if (bannedSuit && suit === bannedSuit) return []; // 售罄封锁下不可作为副露亮出
+  if (bannedSuit && suit === bannedSuit) return [];
 
   const num = parseInt(discardedTile[0], 10);
   const combos = [];
@@ -319,32 +349,83 @@ const getValidChiCombinations = (hand, discardedTile, bannedSuit) => {
   return combos;
 };
 
-export default function MahjongApp() {
+// 计算记牌器数据（阿姨被动：神机妙算）
+// 统计所有未知牌数量 = 初始总牌数 - 观测者手牌 - 全场弃牌河 - 全场副露(含麦咭替牌还原) - 全场亮出花牌
+const computeRemainingTileCounts = (players, viewerId = 0) => {
+  const counts = {};
+  ALL_PLAYABLE_TILES.forEach(t => counts[t] = 4);
+  DRAGONS.forEach(d => counts[d] = 4);
+  counts['八花'] = 8;
+
+  if (!players || players.length === 0) return counts;
+
+  const deduct = (tile) => {
+    if (!tile) return;
+    if (tile.startsWith('花-')) {
+      counts['八花'] = Math.max(0, counts['八花'] - 1);
+    } else if (counts[tile] !== undefined) {
+      counts[tile] = Math.max(0, counts[tile] - 1);
+    }
+  };
+
+  players.forEach(p => {
+    // 1. 观测者自己的手牌已知
+    if (p.id === viewerId) {
+      p.hand.forEach(deduct);
+    }
+    // 2. 全场打出的弃牌已知
+    p.discards.forEach(deduct);
+    // 3. 全场亮出的花牌已知
+    p.flowerTiles.forEach(deduct);
+    // 4. 全场副露已知（注意麦咭刻意求工的第3张牌实际消耗的是 fakeTile）
+    p.melds.forEach(m => {
+      if (m.fakeTile) {
+        deduct(m.tiles[0]);
+        deduct(m.tiles[1]);
+        deduct(m.fakeTile);
+      } else {
+        m.tiles.forEach(deduct);
+      }
+    });
+  });
+
+  return counts;
+};
+
+export default function App() {
   // --- 游戏核心状态 ---
-  const [selectedHumanRole, setSelectedHumanRole] = useState('麦咭');
-  const [aiDifficulty, setAiDifficulty] = useState('NORMAL'); // 'EASY' | 'NORMAL' | 'HARD'
+  const [selectedHumanRole, setSelectedHumanRole] = useState('阿姨');
+  const [aiDifficulty, setAiDifficulty] = useState('NORMAL');
   const [showRoleSelectModal, setShowRoleSelectModal] = useState(true);
 
   const [deck, setDeck] = useState([]);
   const [players, setPlayers] = useState([]);
   const [turn, setTurn] = useState(0);
-  const [gamePhase, setGamePhase] = useState('ROLE_SELECT'); 
-  // ROLE_SELECT, DRAW, ACTION, REACTION, SKILL_MODAL, WINNER, DRAW_GAME
-  
+  // 出牌顺序方向：1 代表逆时针默认顺序 (0->1->2->3->0)，-1 代表顺时针反转顺序 (0->3->2->1->0)
+  const [turnDirection, setTurnDirection] = useState(1);
+  const [gamePhase, setGamePhase] = useState('ROLE_SELECT');
+  // ROLE_SELECT, DRAW, ACTION, REACTION, LAOQIAN_EXTRA_PROMPT, SKILL_MODAL, WINNER, DRAW_GAME
+
   const [logs, setLogs] = useState([]);
   const [lastDiscard, setLastDiscard] = useState(null); // { playerId, role, tile }
   const [bannedSuitInfo, setBannedSuitInfo] = useState(null); // { suit: '万', ownerId: 3 }
   const [winnerInfo, setWinnerInfo] = useState(null);
 
+  // 老千《步步生花》额外摸打预约或响应状态
+  const [laoqianExtraQueued, setLaoqianExtraQueued] = useState(false);
+
+  // 阿姨《神机妙算》记牌器面板展开状态
+  const [showCardCounter, setShowCardCounter] = useState(true);
+
   // 手动理牌状态
   const [selectedHandIdx, setSelectedHandIdx] = useState(null);
 
   // 弹窗与技能交互状态
-  const [qianshuData, setQianshuData] = useState(null); // { cards: [], pickedIdx: null, firstPutIdx: null, putPosition: 'bottom' }
-  const [maijiModal, setMaijiModal] = useState(false); // 麦咭选择废牌弹窗
-  const [lingfengCombos, setLingfengCombos] = useState(null); // { combos: [], tile: '', isSkill: false }
-  const [pawnModal, setPawnModal] = useState(false); // 典当师选择禁打花色弹窗
-  const [pendingReactions, setPendingReactions] = useState(null); // 玩家响应面板选项
+  const [qianshuData, setQianshuData] = useState(null);
+  const [maijiModal, setMaijiModal] = useState(false);
+  const [lingfengCombos, setLingfengCombos] = useState(null);
+  const [pawnModal, setPawnModal] = useState(false);
+  const [pendingReactions, setPendingReactions] = useState(null);
 
   const logsEndRef = useRef(null);
 
@@ -358,11 +439,14 @@ export default function MahjongApp() {
     setLogs(prev => [...prev, msg]);
   };
 
+  // 获取某玩家的当前“下家”与“上家”座位号（随风水轮流转动态变化）
+  const getNextPlayerId = (currentId, dir = turnDirection) => (currentId + dir + 4) % 4;
+  const getUpperPlayerId = (currentId, dir = turnDirection) => (currentId - dir + 4) % 4;
+
   // --- 初始化对局 ---
   const startNewGame = (chosenRole = selectedHumanRole, chosenDiff = aiDifficulty) => {
-    const allRoles = ['老千', '麦咭', '灵风', '典当师'];
+    const allRoles = ['老千', '麦咭', '灵风', '典当师', '阿姨'];
     const remainingRoles = allRoles.filter(r => r !== chosenRole);
-    // 随机分配 AI 角色
     for (let i = remainingRoles.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [remainingRoles[i], remainingRoles[j]] = [remainingRoles[j], remainingRoles[i]];
@@ -370,10 +454,10 @@ export default function MahjongApp() {
 
     let freshDeck = generatePureRandomDeck();
     const positions = ['bottom', 'right', 'top', 'left'];
-    const seatRoles = [chosenRole, ...remainingRoles];
+    const seatRoles = [chosenRole, ...remainingRoles.slice(0, 3)];
 
     const initPlayers = seatRoles.map((role, idx) => {
-      const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(freshDeck, 13);
+      const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(freshDeck, 13, role);
       freshDeck = remainingDeck;
       return {
         id: idx,
@@ -383,8 +467,9 @@ export default function MahjongApp() {
         coins: 2,
         hand: sortHandTiles(drawnHand),
         flowerTiles: drawnFlowers,
-        melds: [], // { type: 'chi'|'peng'|'minggang'|'angang', tiles: [], fakeTile?: string }
+        melds: [],
         discards: [],
+        isFrozen: false, // 阿姨「闲人免进」1巡禁动标记
         position: positions[idx]
       };
     });
@@ -392,9 +477,11 @@ export default function MahjongApp() {
     setDeck(freshDeck);
     setPlayers(initPlayers);
     setTurn(0);
+    setTurnDirection(1);
     setLastDiscard(null);
     setBannedSuitInfo(null);
     setWinnerInfo(null);
+    setLaoqianExtraQueued(false);
     setSelectedHandIdx(null);
     setPendingReactions(null);
     setQianshuData(null);
@@ -402,34 +489,68 @@ export default function MahjongApp() {
     setLingfengCombos(null);
     setPawnModal(false);
     setShowRoleSelectModal(false);
+    setShowCardCounter(chosenRole === '阿姨');
     setGamePhase('DRAW');
-    setLogs([
+
+    const initialLogs = [
       `🎲 牌局开始！AI难度：【${AI_DIFFICULTIES[chosenDiff].name}】，纯随机洗牌完成（144张）。`,
-      `👤 你选择了【${chosenRole}】，开局拥有 2 枚技能币。`,
-      `👉 轮到你的回合，请摸牌或使用摸牌前技能。`
-    ]);
+      `👤 你选择了【${chosenRole}】，开局拥有 2 枚技能币。当前出牌顺序：逆时针（你 → 下家AI-1 → 对家AI-2 → 上家AI-3）。`
+    ];
+    initPlayers.forEach(p => {
+      if (p.role === '灵风') {
+        const northCount = p.flowerTiles.filter(t => t === '北风').length;
+        if (northCount > 0) {
+          initialLogs.push(`🌪️ 【灵风】开局触发《北风，北北风》，摸到的 ${northCount} 张【北风】已自动置入花牌区并补牌！`);
+        }
+      }
+    });
+    if (chosenRole === '阿姨') {
+      initialLogs.push(`🧮 【阿姨】被动《神机妙算》已激活！记牌器已为你实时开启。`);
+    }
+    initialLogs.push(`👉 轮到你的回合，请摸牌或使用摸牌前技能。`);
+    setLogs(initialLogs);
   };
 
-  // --- 回合推进与典当师封锁解除检查 ---
-  const advanceTurn = (nextPlayerId) => {
-    if (bannedSuitInfo && bannedSuitInfo.ownerId === nextPlayerId) {
-      addLog(`🔓 轮回到【典当师】，「售罄」对【${bannedSuitInfo.suit}】花色的封锁已解除！`);
-      setBannedSuitInfo(null);
+  // --- 回合推进（处理典当师封锁解除 & 阿姨「闲人免进」跳过下家1巡） ---
+  const advanceTurn = (targetPlayerId, currentPlayersState = players) => {
+    let actualNextId = targetPlayerId;
+    let workingPlayers = [...currentPlayersState];
+
+    // 检查目标玩家是否正处于阿姨《闲人免进》冻结状态（最多连续检查4次防死循环）
+    for (let step = 0; step < 4; step++) {
+      const targetObj = workingPlayers[actualNextId];
+      if (!targetObj) break;
+
+      if (bannedSuitInfo && bannedSuitInfo.ownerId === actualNextId) {
+        addLog(`🔓 轮回到【典当师】，「售罄」对【${bannedSuitInfo.suit}】花色的封锁已解除！`);
+        setBannedSuitInfo(null);
+      }
+
+      if (targetObj.isFrozen) {
+        addLog(`⛔ [${targetObj.role}](${targetObj.name}) 受【阿姨·闲人免进】限制，本巡禁止任何行动，直接跳过回合！`);
+        workingPlayers = workingPlayers.map(p =>
+          p.id === actualNextId ? { ...p, isFrozen: false } : p
+        );
+        actualNextId = getNextPlayerId(actualNextId, turnDirection);
+      } else {
+        break;
+      }
     }
-    setTurn(nextPlayerId);
+
+    setPlayers(workingPlayers);
+    setTurn(actualNextId);
     setSelectedHandIdx(null);
     setGamePhase('DRAW');
   };
 
-  // --- 摸牌动作（加入严格的手牌数量守恒保护，防止任何重复摸牌导致大相公） ---
-  const handleDrawTile = (playerId, isExtraFlowersSkill = false) => {
-    const targetPlayer = players[playerId];
+  // --- 摸牌动作（含灵风自动补北风、老千步步生花额外抽牌） ---
+  const handleDrawTile = (playerId, isExtraFlowersSkill = false, customPlayers = null) => {
+    const activePlayers = customPlayers || players;
+    const targetPlayer = activePlayers[playerId];
     if (!targetPlayer) return;
 
-    // 强制校验手牌恒等式：摸牌前手牌数 + 副露数*3 必须等于 13
     const expectedBeforeDraw = 13 - targetPlayer.melds.length * 3;
     if (targetPlayer.hand.length > expectedBeforeDraw) {
-      // 已经处于待出牌数量，直接进入 ACTION 阶段避免多摸牌
       setGamePhase('ACTION');
       return;
     }
@@ -440,7 +561,7 @@ export default function MahjongApp() {
       return;
     }
 
-    const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(deck, 1);
+    const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(deck, 1, targetPlayer.role);
     if (drawnHand.length === 0) {
       setDeck(remainingDeck);
       setGamePhase('DRAW_GAME');
@@ -450,11 +571,17 @@ export default function MahjongApp() {
 
     setDeck(remainingDeck);
 
-    setPlayers(prev => prev.map(p => {
+    if (drawnFlowers.length > 0) {
+      const hasNorth = targetPlayer.role === '灵风' && drawnFlowers.includes('北风');
+      if (hasNorth) {
+        addLog(`🌪️ [灵风] 摸到花牌/北风 (${drawnFlowers.join('、')})，触发《北风，北北风》自动置入花牌区并补牌！`);
+      } else {
+        addLog(`🌸 [${targetPlayer.role}] 摸到花牌 (${drawnFlowers.join('、')})，自动亮出并补牌！`);
+      }
+    }
+
+    setPlayers(prev => (customPlayers || prev).map(p => {
       if (p.id === playerId) {
-        if (drawnFlowers.length > 0) {
-          addLog(`🌸 [${p.role}] 摸到花牌 (${drawnFlowers.join('、')})，自动亮出并补牌！`);
-        }
         return {
           ...p,
           hand: [...p.hand, ...drawnHand],
@@ -465,7 +592,7 @@ export default function MahjongApp() {
     }));
 
     if (isExtraFlowersSkill) {
-      addLog(`🌺 [${targetPlayer.role}] 通过《步步生花》完成了额外摸牌，请打出一张牌！`);
+      addLog(`🌺 [${targetPlayer.role}] 发动《步步生花》额外摸入1张牌，请继续出牌！`);
     }
 
     setGamePhase('ACTION');
@@ -476,7 +603,6 @@ export default function MahjongApp() {
     if (!bannedSuitInfo || bannedSuitInfo.ownerId === player.id) return true;
     const suit = getTileSuit(tile);
     if (suit !== bannedSuitInfo.suit) return true;
-    // 除非手中无其他花色的牌可打，否则禁止打出该花色
     const hasOtherOption = player.hand.some(t => getTileSuit(t) !== bannedSuitInfo.suit);
     return !hasOtherOption;
   };
@@ -484,7 +610,6 @@ export default function MahjongApp() {
   // --- 手牌点击（支持理牌交换 + 出牌） ---
   const handleHumanTileClick = (index) => {
     const human = players[0];
-    // 非出牌阶段或玩家主动开启理牌：点击两张牌交换位置
     if (turn !== 0 || gamePhase !== 'ACTION') {
       if (selectedHandIdx === null) {
         setSelectedHandIdx(index);
@@ -504,7 +629,6 @@ export default function MahjongApp() {
       return;
     }
 
-    // 出牌阶段：校验是否被典当师售罄封锁
     const tile = human.hand[index];
     if (!canPlayerDiscardTile(human, tile)) {
       addLog(`⚠️ 无法打出 [${tile}]！当前处于【典当师-售罄】封锁期，禁止打出「${bannedSuitInfo.suit}」花色！`);
@@ -514,7 +638,6 @@ export default function MahjongApp() {
     executeDiscard(0, index);
   };
 
-  // 一键自动理牌
   const handleAutoSortHumanHand = () => {
     setPlayers(prev => prev.map(p => p.id === 0 ? { ...p, hand: sortHandTiles(p.hand) } : p));
     setSelectedHandIdx(null);
@@ -551,43 +674,43 @@ export default function MahjongApp() {
     const { playerId: discarderId, tile } = discardRecord;
     const tileSuit = getTileSuit(tile);
 
-    // 1. 优先检查人类玩家 (id === 0) 是否有可响应动作
+    // 1. 优先检查人类玩家 (id === 0) 是否有可响应动作（若人类被阿姨「闲人免进」冻结，则禁止任何响应）
     if (discarderId !== 0) {
       const human = currentPlayers[0];
-      const isSuitBannedForHuman = bannedSuitInfo && bannedSuitInfo.ownerId !== 0 && bannedSuitInfo.suit === tileSuit;
+      if (!human.isFrozen) {
+        const isSuitBannedForHuman = bannedSuitInfo && bannedSuitInfo.ownerId !== 0 && bannedSuitInfo.suit === tileSuit;
 
-      const huResult = checkCanHu(human, tile, bannedSuitInfo);
-      const sameTileCount = human.hand.filter(t => t === tile).length;
+        const huResult = checkCanHu(human, tile, bannedSuitInfo);
+        const sameTileCount = human.hand.filter(t => t === tile).length;
 
-      const canNormalPeng = !isSuitBannedForHuman && sameTileCount >= 2;
-      const canMingGang = !isSuitBannedForHuman && sameTileCount === 3;
-      // 最新规则：麦咭《刻意求工》消耗 1 币，手里有 1 张相同牌 + 至少 1 张其他废牌即可强行碰出
-      const canMaijiPeng = !isSuitBannedForHuman && human.role === '麦咭' && human.coins >= 1 && sameTileCount >= 1 && human.hand.length >= 2;
+        const canNormalPeng = !isSuitBannedForHuman && sameTileCount >= 2;
+        const canMingGang = !isSuitBannedForHuman && sameTileCount === 3;
+        const canMaijiPeng = !isSuitBannedForHuman && human.role === '麦咭' && human.coins >= 1 && sameTileCount >= 1 && human.hand.length >= 2;
 
-      // 常规上家吃牌 (discarderId === 3 为人类上家)
-      const chiCombos = getValidChiCombinations(human.hand, tile, isSuitBannedForHuman ? tileSuit : null);
-      const canNormalChi = discarderId === 3 && chiCombos.length > 0;
-      // 灵风跨座位吃牌 (非上家，消耗1币)
-      const canLingfengChi = discarderId !== 3 && human.role === '灵风' && human.coins >= 1 && chiCombos.length > 0;
+        // 动态计算人类的上家是谁（受阿姨风水轮流转影响）
+        const humanUpperId = getUpperPlayerId(0, turnDirection);
+        const chiCombos = getValidChiCombinations(human.hand, tile, isSuitBannedForHuman ? tileSuit : null);
+        const canNormalChi = discarderId === humanUpperId && chiCombos.length > 0;
+        const canLingfengChi = discarderId !== humanUpperId && human.role === '灵风' && human.coins >= 1 && chiCombos.length > 0;
 
-      // 即使因为未满4花或售罄被锁胡，如果牌型已经满足胡牌，也弹出响应面板告知玩家原因，避免玩家疑惑“为什么没提示我胡”
-      const hasLockedHuHint = !huResult.canHu && Boolean(huResult.lockedReason);
+        const hasLockedHuHint = !huResult.canHu && Boolean(huResult.lockedReason);
 
-      if (huResult.canHu || hasLockedHuHint || canNormalPeng || canMingGang || canMaijiPeng || canNormalChi || canLingfengChi) {
-        setPendingReactions({
-          discardRecord,
-          canHu: huResult.canHu,
-          huType: huResult.type,
-          huLockedReason: huResult.lockedReason,
-          canNormalPeng,
-          canMingGang,
-          canMaijiPeng,
-          canNormalChi,
-          canLingfengChi,
-          chiCombos
-        });
-        setGamePhase('REACTION');
-        return;
+        if (huResult.canHu || hasLockedHuHint || canNormalPeng || canMingGang || canMaijiPeng || canNormalChi || canLingfengChi) {
+          setPendingReactions({
+            discardRecord,
+            canHu: huResult.canHu,
+            huType: huResult.type,
+            huLockedReason: huResult.lockedReason,
+            canNormalPeng,
+            canMingGang,
+            canMaijiPeng,
+            canNormalChi,
+            canLingfengChi,
+            chiCombos
+          });
+          setGamePhase('REACTION');
+          return;
+        }
       }
     }
 
@@ -595,19 +718,72 @@ export default function MahjongApp() {
     processAIReactions(currentPlayers, discardRecord);
   };
 
-  // --- AI 响应吃碰胡逻辑（根据 AI 难度分级决策） ---
+  // --- 当无人吃碰胡打断时，检查打牌者如果是「老千」且花牌 > 4，是否发动《步步生花》额外摸打 ---
+  const checkLaoqianExtraTurnOrAdvance = (currentPlayers, discarderId) => {
+    const discarder = currentPlayers[discarderId];
+    if (discarder && discarder.role === '老千') {
+      const { total: totalFlw } = getFlowerBreakdown(discarder);
+      if (totalFlw > 4 && discarder.flowerTiles.length > 0 && deck.length > 0) {
+        // 如果人类是老千
+        if (!discarder.isAI) {
+          if (laoqianExtraQueued) {
+            setLaoqianExtraQueued(false);
+            executeLaoqianExtraTurn(0, currentPlayers);
+            return;
+          } else {
+            // 弹出提示询问老千是否消耗1张花牌进行额外摸牌打牌
+            setGamePhase('LAOQIAN_EXTRA_PROMPT');
+            return;
+          }
+        } else {
+          // 如果 AI 是老千，根据难度概率触发《步步生花》连续行动
+          const extraProb = aiDifficulty === 'EASY' ? 0.35 : aiDifficulty === 'NORMAL' ? 0.75 : 0.95;
+          if (Math.random() < extraProb) {
+            setTimeout(() => {
+              executeLaoqianExtraTurn(discarderId, currentPlayers);
+            }, 500);
+            return;
+          }
+        }
+      }
+    }
+
+    // 正常推进到当前方向下的下一位玩家
+    const nextId = getNextPlayerId(discarderId, turnDirection);
+    advanceTurn(nextId, currentPlayers);
+  };
+
+  // 执行老千《步步生花》：扣除1张实体花牌，立刻额外摸1张牌并留在老千的出牌阶段
+  const executeLaoqianExtraTurn = (playerId, currentPlayersState = players) => {
+    const target = currentPlayersState[playerId];
+    if (!target || target.flowerTiles.length === 0) return;
+
+    const nextFlowers = [...target.flowerTiles];
+    const burnedFlower = nextFlowers.pop();
+    const updatedPlayers = currentPlayersState.map(p =>
+      p.id === playerId ? { ...p, flowerTiles: nextFlowers } : p
+    );
+
+    const remainingFlw = getFlowerBreakdown(updatedPlayers[playerId]).total;
+    addLog(`🌺 【老千】触发被动《步步生花》！消耗 1 张花牌【${burnedFlower.replace('花-', '')}】（剩余 ${remainingFlw} 花），获得额外摸牌打牌回合！`);
+
+    setTurn(playerId);
+    handleDrawTile(playerId, true, updatedPlayers);
+  };
+
+  // --- AI 响应吃碰胡逻辑（受阿姨「闲人免进」与「风水轮流转」影响） ---
   const processAIReactions = (currentPlayers, discardRecord) => {
     const { playerId: discarderId, tile } = discardRecord;
     const tileSuit = getTileSuit(tile);
 
-    // 根据难度设定技能与副露积极度
     const skillProb = aiDifficulty === 'EASY' ? 0.15 : aiDifficulty === 'NORMAL' ? 0.45 : 0.85;
     const pengProb = aiDifficulty === 'EASY' ? 0.35 : aiDifficulty === 'NORMAL' ? 0.7 : 0.95;
 
-    // 1. 检查是否有 AI 可以点炮胡牌
+    // 1. 检查是否有未冻结的 AI 可以点炮胡牌
     for (let i = 1; i <= 3; i++) {
       if (i === discarderId) continue;
       const ai = currentPlayers[i];
+      if (ai.isFrozen) continue; // 被阿姨闲人免进冻结，禁止胡牌
       const huRes = checkCanHu(ai, tile, bannedSuitInfo);
       if (huRes.canHu) {
         setWinnerInfo({ winner: ai, winType: `点炮胡 (${huRes.type})`, winningTile: tile });
@@ -617,17 +793,18 @@ export default function MahjongApp() {
       }
     }
 
-    // 2. 检查 AI 碰牌或技能响应
+    // 2. 检查未冻结的 AI 碰牌或技能响应
     for (let i = 1; i <= 3; i++) {
       if (i === discarderId) continue;
       const ai = currentPlayers[i];
+      if (ai.isFrozen) continue; // 被阿姨闲人免进冻结，禁止副露或响应技能
+
       const isSuitBanned = bannedSuitInfo && bannedSuitInfo.ownerId !== ai.id && bannedSuitInfo.suit === tileSuit;
       if (isSuitBanned) continue;
 
       const sameCount = ai.hand.filter(t => t === tile).length;
       const { total: aiFlowers } = getFlowerBreakdown(ai);
 
-      // AI 常规碰牌：当花牌>=3（或困难模式下>=2.5）或角色是麦咭时才碰，防止AI无脑碰牌锁死自己
       const flowerThreshold = aiDifficulty === 'HARD' ? 2.5 : 3;
       if (sameCount >= 2 && (aiFlowers >= flowerThreshold || ai.role === '麦咭') && Math.random() < pengProb) {
         setTimeout(() => {
@@ -651,15 +828,13 @@ export default function MahjongApp() {
         return;
       }
 
-      // 麦咭 AI 发动【刻意求工】（最新规则：1币，用1张真牌+1张废牌强行碰出，不再额外摸牌！）
+      // 麦咭 AI 发动【刻意求工】
       if (ai.role === '麦咭' && ai.coins >= 1 && sameCount === 1 && ai.hand.length >= 2 && Math.random() < skillProb) {
         setTimeout(() => {
           setPlayers(prev => prev.map(p => {
             if (p.id === ai.id) {
               const nextHand = [...p.hand];
-              // 先移除那1张目标真牌
               nextHand.splice(nextHand.indexOf(tile), 1);
-              // 挑选一张孤张作为废牌移除
               const counts = {};
               nextHand.forEach(t => counts[t] = (counts[t] || 0) + 1);
               let wasteIdx = nextHand.findIndex(t => counts[t] === 1);
@@ -683,7 +858,8 @@ export default function MahjongApp() {
       }
 
       // 灵风 AI 发动【乘风】跨座位吃牌（1币）
-      if (ai.role === '灵风' && ai.coins >= 1 && discarderId !== (ai.id + 3) % 4) {
+      const aiUpperId = getUpperPlayerId(ai.id, turnDirection);
+      if (ai.role === '灵风' && ai.coins >= 1 && discarderId !== aiUpperId) {
         const combos = getValidChiCombinations(ai.hand, tile, null);
         if (combos.length > 0 && Math.random() < skillProb) {
           const chosenCombo = combos[0];
@@ -712,8 +888,8 @@ export default function MahjongApp() {
       }
     }
 
-    // 无人响应，进入下一顺位玩家回合
-    advanceTurn((discarderId + 1) % 4);
+    // 无人打断，检查老千是否触发《步步生花》额外回合，或正常推进到下一家
+    checkLaoqianExtraTurnOrAdvance(currentPlayers, discarderId);
   };
 
   // --- 人类玩家响应面板操作 ---
@@ -755,7 +931,8 @@ export default function MahjongApp() {
   const handleHumanMingGang = () => {
     const { tile } = pendingReactions.discardRecord;
     setPendingReactions(null);
-    const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(deck, 1);
+    const humanRole = players[0]?.role;
+    const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(deck, 1, humanRole);
     setDeck(remainingDeck);
 
     setPlayers(prev => prev.map(p => {
@@ -776,12 +953,10 @@ export default function MahjongApp() {
     setGamePhase('ACTION');
   };
 
-  // 麦咭：点击“刻意求工强碰”打开选废牌弹窗
   const handleOpenMaijiSkillModal = () => {
     setMaijiModal(true);
   };
 
-  // 修复核心 Bug：麦咭《刻意求工》（费用1元），移除真牌+废牌共2张手牌，直接进入出牌阶段，绝不额外摸牌！
   const handleConfirmMaijiPeng = (wasteCardIdx) => {
     const { tile } = pendingReactions.discardRecord;
     const human = players[0];
@@ -793,9 +968,7 @@ export default function MahjongApp() {
     setPlayers(prev => prev.map(p => {
       if (p.id === 0) {
         const nextHand = [...p.hand];
-        // 1. 先移除被选作废牌的那张手牌
         nextHand.splice(wasteCardIdx, 1);
-        // 2. 再移除手牌中对应的那1张目标真牌
         const targetIdx = nextHand.indexOf(tile);
         if (targetIdx !== -1) {
           nextHand.splice(targetIdx, 1);
@@ -816,7 +989,6 @@ export default function MahjongApp() {
     setGamePhase('ACTION');
   };
 
-  // 吃牌或灵风《乘风》吃牌
   const handleTriggerChi = (isSkill) => {
     const { chiCombos, discardRecord } = pendingReactions;
     if (chiCombos.length === 1) {
@@ -855,8 +1027,8 @@ export default function MahjongApp() {
     setGamePhase('ACTION');
   };
 
-  // --- 回合内主动动作：自摸、暗杠、老千千术、老千步步生花、典当师售罄 ---
-  
+  // --- 回合内主动技能：老千、典当师、阿姨 ---
+
   // 1. 老千《千术》 (摸牌阶段使用)
   const handleOpenQianshu = () => {
     if (turn !== 0 || gamePhase !== 'DRAW' || players[0].coins < 1 || deck.length < 3) return;
@@ -865,7 +1037,7 @@ export default function MahjongApp() {
       cards: top3,
       pickedIdx: 0,
       firstPutIdx: 1,
-      putPosition: 'bottom' // 'top' | 'bottom'
+      putPosition: 'bottom'
     });
     setGamePhase('SKILL_MODAL');
   };
@@ -887,9 +1059,9 @@ export default function MahjongApp() {
     let finalHandAdd = [];
     let finalFlowerAdd = [];
 
-    if (isFlowerTile(pickedCard)) {
+    if (isFlowerTile(pickedCard, players[0].role)) {
       finalFlowerAdd.push(pickedCard);
-      const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(restDeck, 1);
+      const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(restDeck, 1, players[0].role);
       finalHandAdd = drawnHand;
       finalFlowerAdd.push(...drawnFlowers);
       restDeck = remainingDeck;
@@ -915,27 +1087,7 @@ export default function MahjongApp() {
     setGamePhase('ACTION');
   };
 
-  // 2. 老千被动《步步生花》 (手中花牌数量 > 4 时，在轮到老千摸牌前可消耗1张花牌换取额外摸牌打牌机会)
-  const handleTriggerBubuShenghua = () => {
-    const human = players[0];
-    const { total } = getFlowerBreakdown(human);
-    // 严格在 DRAW 阶段（老千轮次摸牌时）触发，消耗1张花牌立刻完成摸牌进入出牌阶段，保证手牌恒等式绝不出错
-    if (turn !== 0 || gamePhase !== 'DRAW' || human.role !== '老千' || total <= 4 || human.flowerTiles.length === 0) return;
-
-    setPlayers(prev => prev.map(p => {
-      if (p.id === 0) {
-        const nextFlowers = [...p.flowerTiles];
-        const burned = nextFlowers.pop();
-        addLog(`🌺 【老千】触发《步步生花》！消耗1张花牌【${burned}】，换取本轮额外摸打机会！`);
-        return { ...p, flowerTiles: nextFlowers };
-      }
-      return p;
-    }));
-
-    handleDrawTile(0, true);
-  };
-
-  // 3. 典当师《售罄》 (出牌阶段声明花色：禁打 / 禁胡 / 禁作为副露亮出)
+  // 2. 典当师《售罄》
   const handleConfirmPawnBan = (suit) => {
     setPawnModal(false);
     setPlayers(prev => prev.map(p => p.id === 0 ? { ...p, coins: p.coins - 1 } : p));
@@ -943,7 +1095,35 @@ export default function MahjongApp() {
     addLog(`🚫 【典当师】消耗1币发动《售罄》！下回合开始前，全场禁止打出/胡/副露亮出「${suit}」花色！`);
   };
 
-  // 4. 自己回合暗杠或加杠
+  // 3. 阿姨主动技能 1：《闲人免进》（1币，指定下家1巡禁止任何行动）
+  const handleAyiFreezeNext = () => {
+    const human = players[0];
+    if (turn !== 0 || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || human.role !== '阿姨' || human.coins < 1) return;
+    const nextId = getNextPlayerId(0, turnDirection);
+    const nextPlayer = players[nextId];
+    if (!nextPlayer || nextPlayer.isFrozen) return;
+
+    setPlayers(prev => prev.map(p => {
+      if (p.id === 0) return { ...p, coins: p.coins - 1 };
+      if (p.id === nextId) return { ...p, isFrozen: true };
+      return p;
+    }));
+    addLog(`⛔ 【阿姨】消耗1币发动《闲人免进》！指定当前下家 [${nextPlayer.role}](${nextPlayer.name}) 1巡禁止任何行动（禁响应吃碰胡、下回合直接跳过）！`);
+  };
+
+  // 4. 阿姨主动技能 2：《风水轮流转》（1币，转换本局游戏的出牌顺序：顺时针 ⇄ 逆时针）
+  const handleAyiReverseDirection = () => {
+    const human = players[0];
+    if (turn !== 0 || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || human.role !== '阿姨' || human.coins < 1) return;
+    const newDir = turnDirection * -1;
+    setTurnDirection(newDir);
+    setPlayers(prev => prev.map(p => p.id === 0 ? { ...p, coins: p.coins - 1 } : p));
+
+    const newNextPlayer = players[getNextPlayerId(0, newDir)];
+    addLog(`🔄 【阿姨】消耗1币发动《风水轮流转》！全场出牌顺序已转换为【${newDir === 1 ? '逆时针' : '顺时针'}】，当前下家变为 [${newNextPlayer.role}](${newNextPlayer.name})！`);
+  };
+
+  // 5. 自己回合暗杠或明杠
   const getHumanSelfGangOptions = () => {
     if (turn !== 0 || gamePhase !== 'ACTION') return [];
     const human = players[0];
@@ -953,7 +1133,8 @@ export default function MahjongApp() {
   };
 
   const handleHumanAnGang = (tile, isMingChoice = false) => {
-    const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(deck, 1);
+    const humanRole = players[0]?.role;
+    const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(deck, 1, humanRole);
     setDeck(remainingDeck);
 
     setPlayers(prev => prev.map(p => {
@@ -971,7 +1152,7 @@ export default function MahjongApp() {
     addLog(`🀄 你选择了${isMingChoice ? '【明杠】(算1张花牌)' : '【暗杠】(不算花牌)'}【${tile}】，并补摸1张牌！`);
   };
 
-  // 5. 自摸胡牌
+  // 6. 自摸胡牌
   const handleHumanTsumo = () => {
     const res = checkCanHu(players[0], null, bannedSuitInfo);
     if (!res.canHu) return;
@@ -980,7 +1161,7 @@ export default function MahjongApp() {
     addLog(`🎉 恭喜！你自摸胡牌 (${res.type})！`);
   };
 
-  // --- 智能 AI 出牌评分器（根据简单/普通/困难难度决定打哪张牌） ---
+  // --- 智能 AI 出牌评分器（含阿姨记牌器加成） ---
   const selectAIDiscardIndex = (aiPlayer) => {
     const validIndices = [];
     aiPlayer.hand.forEach((t, idx) => {
@@ -988,7 +1169,6 @@ export default function MahjongApp() {
     });
     if (validIndices.length === 0) return 0;
 
-    // 简单模式：有 50% 概率随机打出一张合法牌
     if (aiDifficulty === 'EASY' && Math.random() < 0.5) {
       return validIndices[Math.floor(Math.random() * validIndices.length)];
     }
@@ -996,7 +1176,9 @@ export default function MahjongApp() {
     const counts = {};
     aiPlayer.hand.forEach(t => counts[t] = (counts[t] || 0) + 1);
 
-    // 为每张可打出的牌计算保留价值分（分数越低越优先打出）
+    // 阿姨拥有《神机妙算》记牌器，AI 阿姨能识别死张（剩余数量为0的孤张优先打出）
+    const remainingMap = aiPlayer.role === '阿姨' ? computeRemainingTileCounts(players, aiPlayer.id) : null;
+
     let lowestScore = Infinity;
     let bestDiscardIdx = validIndices[0];
 
@@ -1004,29 +1186,25 @@ export default function MahjongApp() {
       const tile = aiPlayer.hand[idx];
       let keepScore = 0;
 
-      // 对子或刻子价值高
       if (counts[tile] === 2) keepScore += 40;
       if (counts[tile] >= 3) keepScore += 90;
-
-      // 典当师极力保留暗刻（算花牌）
       if (aiPlayer.role === '典当师' && counts[tile] >= 3) keepScore += 50;
 
-      // 灵风保留北风做牌
-      if (aiPlayer.role === '灵风' && tile === '北风') keepScore += 35;
+      if (remainingMap && counts[tile] === 1 && remainingMap[tile] === 0) {
+        keepScore -= 25; // 外面已经绝张的单张优先打掉
+      }
 
-      // 序数牌检查相邻搭子
       const suit = getTileSuit(tile);
       if (SUITS.includes(suit)) {
         const num = parseInt(tile[0], 10);
-        if (num >= 3 && num <= 7) keepScore += 5; // 中张比边张更有用
+        if (num >= 3 && num <= 7) keepScore += 5;
         if (aiPlayer.hand.includes(`${num - 1}${suit}`) || aiPlayer.hand.includes(`${num + 1}${suit}`)) {
-          keepScore += 25; // 连张搭子
+          keepScore += 25;
         }
         if (aiPlayer.hand.includes(`${num - 2}${suit}`) || aiPlayer.hand.includes(`${num + 2}${suit}`)) {
-          keepScore += 12; // 嵌张搭子
+          keepScore += 12;
         }
       } else {
-        // 孤张风牌最优先打出
         if (counts[tile] === 1) keepScore -= 20;
       }
 
@@ -1046,32 +1224,22 @@ export default function MahjongApp() {
     const ai = players[turn];
     if (!ai) return;
 
+    // 防御式检查：如果当前轮到的 AI 被阿姨冻结，立即解冻并跳过
+    if (ai.isFrozen) {
+      const skipTimer = setTimeout(() => {
+        advanceTurn(turn, players);
+      }, 450);
+      return () => clearTimeout(skipTimer);
+    }
+
     const skillTriggerProb = aiDifficulty === 'EASY' ? 0.15 : aiDifficulty === 'NORMAL' ? 0.45 : 0.85;
 
     if (gamePhase === 'DRAW') {
       const timer = setTimeout(() => {
-        const { total: aiFlw } = getFlowerBreakdown(ai);
-
-        // 1. 老千 AI 优先检查被动《步步生花》（花>4且有实体花牌时，消耗1花获得额外摸打）
-        if (ai.role === '老千' && aiFlw > 4 && ai.flowerTiles.length > 0 && Math.random() < skillTriggerProb) {
-          setPlayers(prev => prev.map(p => {
-            if (p.id === ai.id) {
-              const nextF = [...p.flowerTiles];
-              nextF.pop();
-              return { ...p, flowerTiles: nextF };
-            }
-            return p;
-          }));
-          addLog(`🌺 【老千】触发《步步生花》，消耗1张花牌进行额外摸打！`);
-          handleDrawTile(turn, true);
-          return;
-        }
-
-        // 2. 老千 AI 在摸牌阶段发动《千术》看3拿1
+        // 老千 AI 在摸牌阶段发动《千术》看3拿1
         if (ai.role === '老千' && ai.coins >= 1 && deck.length >= 3 && Math.random() < skillTriggerProb) {
           const top3 = deck.slice(0, 3);
-          // 优先挑选花牌或者手里已有的对子搭子
-          let pickIdx = top3.findIndex(t => isFlowerTile(t) || ai.hand.includes(t));
+          let pickIdx = top3.findIndex(t => isFlowerTile(t, ai.role) || ai.hand.includes(t));
           if (pickIdx === -1) pickIdx = 0;
           const picked = top3[pickIdx];
           const others = top3.filter((_, idx) => idx !== pickIdx);
@@ -1079,9 +1247,9 @@ export default function MahjongApp() {
 
           let addH = [];
           let addF = [];
-          if (isFlowerTile(picked)) {
+          if (isFlowerTile(picked, ai.role)) {
             addF.push(picked);
-            const res = drawAndResolveFlowers(rest, 1);
+            const res = drawAndResolveFlowers(rest, 1, ai.role);
             addH = res.drawnHand;
             addF.push(...res.drawnFlowers);
             setDeck(res.remainingDeck);
@@ -1116,7 +1284,7 @@ export default function MahjongApp() {
           return;
         }
 
-        // 2. 典当师 AI 发动《售罄》（注意：如果花掉1币会导致典当师已碰牌但花数跌破4花，聪明AI不会乱放）
+        // 2. 典当师 AI 发动《售罄》
         const { total: currentAIFlw } = getFlowerBreakdown(currentAI);
         const aiHasPeng = currentAI.melds.some(m => m.type === 'peng');
         const safeToSpendCoin = !aiHasPeng || (currentAIFlw - 1 >= 4);
@@ -1127,21 +1295,39 @@ export default function MahjongApp() {
             const s = getTileSuit(t);
             if (suitCounts[s] !== undefined) suitCounts[s]++;
           });
-          // 封锁自己手牌中最少的花色
           const leastSuit = Object.keys(suitCounts).sort((a, b) => suitCounts[a] - suitCounts[b])[0];
           setPlayers(prev => prev.map(p => p.id === currentAI.id ? { ...p, coins: p.coins - 1 } : p));
           setBannedSuitInfo({ suit: leastSuit, ownerId: currentAI.id });
           addLog(`🚫 【典当师】消耗1币发动《售罄》！全场禁止打出/胡/副露亮出「${leastSuit}」花色！`);
         }
 
-        // 3. 选择最合理的牌打出
+        // 3. 阿姨 AI 发动《闲人免进》或《风水轮流转》
+        if (currentAI.role === '阿姨' && currentAI.coins >= 1 && Math.random() < skillTriggerProb * 0.65) {
+          const nextId = getNextPlayerId(currentAI.id, turnDirection);
+          const nextPlayerObj = players[nextId];
+          if (nextPlayerObj && !nextPlayerObj.isFrozen && Math.random() < 0.6) {
+            setPlayers(prev => prev.map(p => {
+              if (p.id === currentAI.id) return { ...p, coins: p.coins - 1 };
+              if (p.id === nextId) return { ...p, isFrozen: true };
+              return p;
+            }));
+            addLog(`⛔ 【阿姨】消耗1币发动《闲人免进》！指定下家 [${nextPlayerObj.role}](${nextPlayerObj.name}) 1巡禁止任何行动！`);
+          } else {
+            const newDir = turnDirection * -1;
+            setTurnDirection(newDir);
+            setPlayers(prev => prev.map(p => p.id === currentAI.id ? { ...p, coins: p.coins - 1 } : p));
+            addLog(`🔄 【阿姨】消耗1币发动《风水轮流转》！出牌顺序已反转为【${newDir === 1 ? '逆时针' : '顺时针'}】！`);
+          }
+        }
+
+        // 4. 选择最合理的牌打出
         const chosenIdx = selectAIDiscardIndex(currentAI);
         executeDiscard(turn, chosenIdx);
       }, 850);
       return () => clearTimeout(timer);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turn, gamePhase, players, deck.length]);
+  }, [turn, gamePhase, players, deck.length, turnDirection]);
 
   // --- UI 渲染辅助函数 ---
   const getTileStyle = (tile) => {
@@ -1200,13 +1386,25 @@ export default function MahjongApp() {
     const hasPeng = player.melds.some(m => m.type === 'peng');
     const isPengLocked = hasPeng && totalFlw < 4;
     const roleCfg = ROLES_INFO[player.role];
+    const isHumanNextTarget = getNextPlayerId(0, turnDirection) === player.id;
+    const isHumanUpperTarget = getUpperPlayerId(0, turnDirection) === player.id;
 
     return (
-      <div className={`bg-neutral-900/85 border ${isActive ? 'border-yellow-400 ring-2 ring-yellow-400/50' : 'border-neutral-700'} px-3 py-2 rounded-xl shadow-lg backdrop-blur-md text-xs transition-all`}>
+      <div className={`bg-neutral-900/85 border ${isActive ? 'border-yellow-400 ring-2 ring-yellow-400/50' : player.isFrozen ? 'border-rose-500 ring-2 ring-rose-500/50' : 'border-neutral-700'} px-3 py-2 rounded-xl shadow-lg backdrop-blur-md text-xs transition-all`}>
         <div className="flex items-center justify-between space-x-3 mb-1">
           <span className={`font-black text-sm ${roleCfg.text} flex items-center`}>
             {player.role}
             <span className="text-[10px] text-gray-400 font-normal ml-1">({player.name})</span>
+            {player.id !== 0 && isHumanNextTarget && (
+              <span className="ml-1.5 bg-cyan-950 border border-cyan-600 text-cyan-300 text-[9px] px-1 py-0.2 rounded">
+                当前下家
+              </span>
+            )}
+            {player.id !== 0 && isHumanUpperTarget && (
+              <span className="ml-1.5 bg-amber-950 border border-amber-600 text-amber-300 text-[9px] px-1 py-0.2 rounded">
+                当前上家
+              </span>
+            )}
           </span>
           <div className="flex items-center space-x-2">
             <span className="flex items-center bg-yellow-950/70 border border-yellow-700/50 px-1.5 py-0.5 rounded text-yellow-300" title="技能币">
@@ -1223,8 +1421,13 @@ export default function MahjongApp() {
 
         {/* 状态标签栏 */}
         <div className="flex flex-wrap gap-1 items-center text-[10px] text-gray-400">
-          <span>实体花:{player.flowerTiles.length}</span>
+          <span>花牌区:{player.flowerTiles.length}</span>
           {player.melds.length > 0 && <span>| 副露:{player.melds.length}</span>}
+          {player.isFrozen && (
+            <span className="bg-rose-900/90 border border-rose-500 text-rose-200 px-1.5 py-0.2 rounded font-bold flex items-center animate-pulse">
+              <Lock size={10} className="mr-0.5" /> 闲人免进(禁动1巡)
+            </span>
+          )}
           {isPengLocked && (
             <span className="bg-red-900/80 text-red-200 px-1.5 py-0.2 rounded font-bold animate-pulse">
               已碰未满4花(禁胡)
@@ -1265,6 +1468,8 @@ export default function MahjongApp() {
     : { canHu: false, lockedReason: null };
   const humanGangOptions = getHumanSelfGangOptions();
   const humanTingList = humanPlayer ? getTingTiles(humanPlayer, bannedSuitInfo) : [];
+  const cardCounterMap = humanPlayer?.role === '阿姨' ? computeRemainingTileCounts(players, 0) : null;
+  const currentNextPlayer = players[getNextPlayerId(0, turnDirection)];
 
   return (
     <div className="min-h-screen bg-neutral-950 flex flex-col lg:flex-row text-gray-100 font-sans select-none overflow-hidden">
@@ -1275,7 +1480,7 @@ export default function MahjongApp() {
         {/* 顶部栏：场地状态 & 对家(AI-2) */}
         <div className="flex flex-col items-center space-y-2 z-10">
           <div className="w-full flex justify-between items-start">
-            {/* 左上角快捷重选角色与难度按钮 */}
+            {/* 左上角快捷重选角色与难度 + 出牌顺序方向指示 */}
             <div className="flex flex-col space-y-1.5">
               <button
                 onClick={() => setShowRoleSelectModal(true)}
@@ -1283,11 +1488,17 @@ export default function MahjongApp() {
               >
                 <Users size={14} className="mr-1.5 text-yellow-400" /> 角色 / AI难度设置
               </button>
-              <div className="text-[11px] bg-black/35 px-2.5 py-1 rounded border border-white/10 flex items-center space-x-1">
-                <Brain size={12} className="text-cyan-400" />
-                <span className="text-gray-300">AI难度:</span>
-                <span className={`font-bold ${AI_DIFFICULTIES[aiDifficulty].color}`}>
-                  {AI_DIFFICULTIES[aiDifficulty].name}
+              <div className="text-[11px] bg-black/35 px-2.5 py-1 rounded border border-white/10 flex items-center space-x-2">
+                <span className="flex items-center">
+                  <Brain size={12} className="text-cyan-400 mr-1" />
+                  <span className={`font-bold ${AI_DIFFICULTIES[aiDifficulty].color}`}>
+                    {AI_DIFFICULTIES[aiDifficulty].name}
+                  </span>
+                </span>
+                <span>|</span>
+                <span className="flex items-center text-amber-300 font-bold" title="当前出牌顺序（阿姨【风水轮流转】可反转）">
+                  {turnDirection === 1 ? <RotateCcw size={12} className="mr-1" /> : <RotateCw size={12} className="mr-1" />}
+                  {turnDirection === 1 ? '逆时针' : '顺时针'}
                 </span>
               </div>
             </div>
@@ -1304,8 +1515,8 @@ export default function MahjongApp() {
               </div>
             )}
 
-            {/* 右上角全场封锁警示 */}
-            <div className="min-w-[150px] flex justify-end">
+            {/* 右上角全场封锁警示 + 阿姨记牌器开关 */}
+            <div className="min-w-[150px] flex flex-col items-end space-y-1.5">
               {bannedSuitInfo ? (
                 <div className="bg-purple-950/90 border-2 border-purple-400 px-3 py-1.5 rounded-xl flex items-center space-x-2 animate-pulse shadow-lg">
                   <Ban size={16} className="text-purple-300" />
@@ -1319,14 +1530,98 @@ export default function MahjongApp() {
                   当前无花色封锁
                 </div>
               )}
+
+              {humanPlayer?.role === '阿姨' && (
+                <button
+                  onClick={() => setShowCardCounter(prev => !prev)}
+                  className="bg-rose-950/90 hover:bg-rose-900 border border-rose-500 text-rose-200 text-xs px-2.5 py-1 rounded-lg flex items-center shadow-md font-bold"
+                >
+                  <Calculator size={13} className="mr-1 text-rose-400" />
+                  神机妙算记牌器
+                  {showCardCounter ? <ChevronUp size={13} className="ml-1" /> : <ChevronDown size={13} className="ml-1" />}
+                </button>
+              )}
             </div>
           </div>
+
+          {/* 阿姨专属被动《神机妙算》实时记牌器面板 */}
+          {humanPlayer?.role === '阿姨' && showCardCounter && cardCounterMap && (
+            <div className="w-full max-w-4xl bg-neutral-950/90 border border-rose-500/50 rounded-2xl p-2.5 shadow-2xl backdrop-blur-md text-[11px]">
+              <div className="flex items-center justify-between mb-1.5 pb-1 border-b border-neutral-800">
+                <span className="font-black text-rose-400 flex items-center">
+                  <Calculator size={13} className="mr-1" /> 阿姨 · 神机妙算记牌器（未现身剩余张数）
+                </span>
+                <span className="text-[10px] text-gray-400">
+                  已自动扣除你的手牌、全场弃牌河、副露与花牌区
+                </span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5">
+                {SUITS.map(suit => (
+                  <div key={suit} className="flex items-center space-x-1 bg-black/40 px-2 py-1 rounded">
+                    <span className="font-bold text-gray-300 w-5">{suit}:</span>
+                    <div className="flex-1 grid grid-cols-9 gap-1">
+                      {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => {
+                        const tileKey = `${num}${suit}`;
+                        const left = cardCounterMap[tileKey];
+                        return (
+                          <div
+                            key={tileKey}
+                            className={`flex flex-col items-center py-0.5 rounded border ${
+                              left === 0
+                                ? 'bg-neutral-900 border-neutral-800 text-neutral-600'
+                                : left === 1
+                                ? 'bg-red-950/60 border-red-700/60 text-red-300 font-bold'
+                                : 'bg-neutral-800/80 border-neutral-700 text-gray-200'
+                            }`}
+                          >
+                            <span className="text-[10px] leading-none">{num}{suit}</span>
+                            <span className={`text-[10px] font-black mt-0.5 ${left >= 3 ? 'text-emerald-400' : left === 2 ? 'text-yellow-300' : ''}`}>
+                              剩{left}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+                <div className="flex items-center space-x-1 bg-black/40 px-2 py-1 rounded">
+                  <span className="font-bold text-gray-300 w-5">风/花:</span>
+                  <div className="flex-1 grid grid-cols-8 gap-1">
+                    {[...WINDS, ...DRAGONS].map(t => {
+                      const left = cardCounterMap[t];
+                      return (
+                        <div
+                          key={t}
+                          className={`flex flex-col items-center py-0.5 rounded border ${
+                            left === 0
+                              ? 'bg-neutral-900 border-neutral-800 text-neutral-600'
+                              : left === 1
+                              ? 'bg-red-950/60 border-red-700/60 text-red-300 font-bold'
+                              : 'bg-neutral-800/80 border-neutral-700 text-gray-200'
+                          }`}
+                        >
+                          <span className="text-[10px] leading-none">{t.replace('风', '')}</span>
+                          <span className={`text-[10px] font-black mt-0.5 ${left >= 3 ? 'text-emerald-400' : left === 2 ? 'text-yellow-300' : ''}`}>
+                            剩{left}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    <div className="flex flex-col items-center py-0.5 rounded border bg-pink-950/50 border-pink-700/50 text-pink-200">
+                      <span className="text-[10px] leading-none">8花</span>
+                      <span className="text-[10px] font-black mt-0.5">剩{cardCounterMap['八花']}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* 中部区域：上家(AI-3) + 中央牌河与牌山信息 + 下家(AI-1) */}
+        {/* 中部区域：左侧(AI-3) + 中央牌河与牌山信息 + 右侧(AI-1) */}
         <div className="w-full flex justify-between items-center my-2 flex-1">
           
-          {/* 左侧上家 (AI-3) */}
+          {/* 左侧 (AI-3) */}
           {players[3] && (
             <div className="flex items-center space-x-2">
               <div className="flex flex-col space-y-1">
@@ -1340,10 +1635,14 @@ export default function MahjongApp() {
 
           {/* 中央牌池与公牌信息 */}
           <div className="flex-1 max-w-xl mx-4 bg-black/25 border-2 border-emerald-800/60 rounded-3xl p-4 flex flex-col items-center justify-between min-h-[210px] backdrop-blur-sm shadow-2xl">
-            <div className="flex items-center space-x-4 text-xs md:text-sm text-emerald-200 font-bold">
+            <div className="flex flex-wrap items-center justify-center gap-3 text-xs md:text-sm text-emerald-200 font-bold">
               <span>剩余牌山: <strong className="text-yellow-400 text-base">{deck.length}</strong> 张</span>
               <span>|</span>
               <span>当前轮次: <strong className="text-white">{players[turn]?.role}</strong></span>
+              <span>|</span>
+              <span className="text-amber-300 flex items-center">
+                顺序: {turnDirection === 1 ? '逆时针 ↺' : '顺时针 ↻'}
+              </span>
             </div>
 
             {/* 最新打出的一张牌高亮 */}
@@ -1381,7 +1680,7 @@ export default function MahjongApp() {
             </div>
           </div>
 
-          {/* 右侧下家 (AI-1) */}
+          {/* 右侧 (AI-1) */}
           {players[1] && (
             <div className="flex items-center space-x-2">
               {renderPlayerCard(players[1])}
@@ -1398,6 +1697,36 @@ export default function MahjongApp() {
         {humanPlayer && (
           <div className="flex flex-col items-center w-full max-w-5xl mx-auto space-y-2.5 z-10">
             
+            {/* 老千打牌后无人中断时，弹出《步步生花》额外抽牌打牌确认栏 */}
+            {gamePhase === 'LAOQIAN_EXTRA_PROMPT' && (
+              <div className="w-full bg-pink-950/95 border-2 border-pink-400 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2 shadow-2xl animate-pulse">
+                <div className="flex items-center space-x-2">
+                  <Flower className="text-pink-400" size={20} />
+                  <div className="text-xs md:text-sm text-white">
+                    <span className="font-black text-pink-300">【老千 · 步步生花】已就绪！</span>
+                    <span className="ml-1">你当前拥有 <strong>{humanFlowerInfo.total} 花</strong>（大于4花），是否消耗 1 张花牌换取<strong>额外的抽牌打牌机会</strong>？</span>
+                  </div>
+                </div>
+                <div className="flex space-x-2">
+                  <button
+                    onClick={() => executeLaoqianExtraTurn(0, players)}
+                    className="bg-pink-600 hover:bg-pink-500 text-white font-black px-4 py-1.5 rounded-lg shadow-lg text-xs md:text-sm"
+                  >
+                    🌺 消耗1花：额外摸牌并继续打牌
+                  </button>
+                  <button
+                    onClick={() => {
+                      const nextId = getNextPlayerId(0, turnDirection);
+                      advanceTurn(nextId, players);
+                    }}
+                    className="bg-neutral-700 hover:bg-neutral-600 text-gray-200 font-bold px-4 py-1.5 rounded-lg text-xs md:text-sm"
+                  >
+                    不发动，结束回合
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* 当别人打牌时：吃 / 碰 / 杠 / 胡 / 技能响应浮层 */}
             {gamePhase === 'REACTION' && pendingReactions && (
               <div className="w-full bg-amber-950/95 border-2 border-yellow-400 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2 shadow-2xl">
@@ -1438,7 +1767,7 @@ export default function MahjongApp() {
                   )}
                   {pendingReactions.canNormalChi && (
                     <button onClick={() => handleTriggerChi(false)} className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-3 py-1.5 rounded-lg shadow">
-                      吃牌
+                      吃上家牌
                     </button>
                   )}
                   {pendingReactions.canLingfengChi && (
@@ -1461,7 +1790,7 @@ export default function MahjongApp() {
               </div>
             )}
 
-            {/* 实时听牌提示器（当玩家处于13张有效牌等摸牌/等点炮时自动显示听哪些牌） */}
+            {/* 实时听牌提示器 */}
             {humanTingList.length > 0 && (
               <div className="w-full bg-emerald-950/90 border border-emerald-500/60 px-3 py-1.5 rounded-xl flex flex-wrap items-center justify-between text-xs shadow">
                 <div className="flex items-center space-x-2">
@@ -1497,14 +1826,21 @@ export default function MahjongApp() {
             <div className="w-full flex flex-wrap justify-between items-end gap-2 px-2">
               {renderPlayerCard(humanPlayer)}
 
-              {/* 拔出的实体花牌展示 */}
-              <div className="flex items-center space-x-1 bg-black/35 px-3 py-1.5 rounded-xl border border-pink-500/20">
+              {/* 拔出的实体花牌展示（含灵风自动收入花牌区的北风） */}
+              <div className="flex flex-wrap items-center gap-1 bg-black/35 px-3 py-1.5 rounded-xl border border-pink-500/20 max-w-md">
                 <span className="text-xs text-pink-300 mr-1 font-bold">花牌区 ({humanFlowerInfo.total}花):</span>
                 {humanPlayer.flowerTiles.length === 0 ? (
                   <span className="text-xs text-gray-500">暂无实体花</span>
                 ) : (
                   humanPlayer.flowerTiles.map((ft, idx) => (
-                    <span key={idx} className="text-xs bg-pink-950/90 border border-pink-700 text-pink-200 px-1.5 py-0.5 rounded font-bold">
+                    <span
+                      key={idx}
+                      className={`text-xs px-1.5 py-0.5 rounded font-bold border ${
+                        ft === '北风'
+                          ? 'bg-emerald-950 border-emerald-500 text-emerald-200'
+                          : 'bg-pink-950/90 border-pink-700 text-pink-200'
+                      }`}
+                    >
                       {ft.replace('花-', '')}
                     </span>
                   ))
@@ -1535,7 +1871,7 @@ export default function MahjongApp() {
                   摸牌 <ChevronRight size={16} className="ml-0.5" />
                 </button>
 
-                {/* 老千专属：千术 + 步步生花 */}
+                {/* 老千专属：千术 + 步步生花额外回合预约 */}
                 {humanPlayer.role === '老千' && (
                   <>
                     <button
@@ -1550,16 +1886,19 @@ export default function MahjongApp() {
                       <Eye size={15} className="mr-1" /> 千术 (1币)
                     </button>
                     <button
-                      onClick={handleTriggerBubuShenghua}
-                      disabled={turn !== 0 || gamePhase !== 'DRAW' || humanFlowerInfo.total <= 4 || humanPlayer.flowerTiles.length === 0}
-                      className={`px-3 py-2 rounded-lg font-bold text-xs md:text-sm flex items-center ${
-                        turn === 0 && gamePhase === 'DRAW' && humanFlowerInfo.total > 4 && humanPlayer.flowerTiles.length > 0
-                          ? 'bg-pink-600 hover:bg-pink-500 text-white shadow-lg animate-pulse'
+                      onClick={() => setLaoqianExtraQueued(prev => !prev)}
+                      disabled={turn !== 0 || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || humanFlowerInfo.total <= 4 || humanPlayer.flowerTiles.length === 0}
+                      className={`px-3 py-2 rounded-lg font-bold text-xs md:text-sm flex items-center transition-all ${
+                        turn === 0 && (gamePhase === 'DRAW' || gamePhase === 'ACTION') && humanFlowerInfo.total > 4 && humanPlayer.flowerTiles.length > 0
+                          ? laoqianExtraQueued
+                            ? 'bg-pink-500 text-white ring-2 ring-yellow-300 shadow-lg'
+                            : 'bg-pink-700 hover:bg-pink-600 text-white shadow-lg'
                           : 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
                       }`}
-                      title="花牌大于4时，轮到老千摸牌时可消耗1张花牌换取摸打机会"
+                      title="花牌大于4时，开启后打出本张牌将自动消耗1张花牌并立即额外摸1张牌继续出牌"
                     >
-                      <Flower size={15} className="mr-1" /> 步步生花 (-1花)
+                      <Flower size={15} className="mr-1" />
+                      {laoqianExtraQueued ? '✅ 已预约步步生花(-1花)' : '步步生花:额外摸打(-1花)'}
                     </button>
                   </>
                 )}
@@ -1577,6 +1916,38 @@ export default function MahjongApp() {
                   >
                     <Ban size={15} className="mr-1" /> 售罄禁花色 (1币)
                   </button>
+                )}
+
+                {/* 阿姨专属：闲人免进 (1币) + 风水轮流转 (1币) */}
+                {humanPlayer.role === '阿姨' && (
+                  <>
+                    <button
+                      onClick={handleAyiFreezeNext}
+                      disabled={turn !== 0 || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || humanPlayer.coins < 1 || currentNextPlayer?.isFrozen}
+                      className={`px-3 py-2 rounded-lg font-bold text-xs md:text-sm flex items-center ${
+                        turn === 0 && (gamePhase === 'DRAW' || gamePhase === 'ACTION') && humanPlayer.coins >= 1 && !currentNextPlayer?.isFrozen
+                          ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-lg'
+                          : 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
+                      }`}
+                      title="指定当前下家1巡禁止任何行动（禁响应、跳过下回合）"
+                    >
+                      <Lock size={14} className="mr-1" />
+                      闲人免进:禁{currentNextPlayer?.role} (1币)
+                    </button>
+                    <button
+                      onClick={handleAyiReverseDirection}
+                      disabled={turn !== 0 || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || humanPlayer.coins < 1}
+                      className={`px-3 py-2 rounded-lg font-bold text-xs md:text-sm flex items-center ${
+                        turn === 0 && (gamePhase === 'DRAW' || gamePhase === 'ACTION') && humanPlayer.coins >= 1
+                          ? 'bg-orange-500 hover:bg-orange-400 text-black shadow-lg'
+                          : 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
+                      }`}
+                      title="转换本局游戏的出牌顺序（顺时针 ⇄ 逆时针）"
+                    >
+                      {turnDirection === 1 ? <RotateCw size={14} className="mr-1" /> : <RotateCcw size={14} className="mr-1" />}
+                      风水轮流转 (1币)
+                    </button>
+                  </>
                 )}
 
                 {/* 暗杠 / 明杠选择 */}
@@ -1619,19 +1990,18 @@ export default function MahjongApp() {
                       {renderMahjongTile(tile, {
                         onClick: () => handleHumanTileClick(i),
                         isSelected: selectedHandIdx === i,
-                        isDisabled: turn === 0 && gamePhase === 'ACTION' && !isAllowed,
-                        badge: humanPlayer.role === '灵风' && tile === '北风' ? '+1花' : null
+                        isDisabled: turn === 0 && gamePhase === 'ACTION' && !isAllowed
                       })}
                       {turn === 0 && gamePhase === 'ACTION' && isAllowed && (
                         <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-red-600 text-white text-[10px] px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
-                          打出
+                          {laoqianExtraQueued ? '打出并再摸1张' : '打出'}
                         </div>
                       )}
                     </div>
                   );
                 })}
               </div>
-              <div className="text-[11px] text-emerald-200/70 mt-2 flex items-center space-x-4">
+              <div className="text-[11px] text-emerald-200/70 mt-2 flex flex-wrap items-center justify-center gap-3">
                 <span>💡 提示：{turn === 0 && gamePhase === 'ACTION' ? '点击手牌即可打出' : '非出牌阶段点击两张手牌可自由交换位置（手动理牌）'}</span>
                 <span>|</span>
                 <span>花数详情：{humanFlowerInfo.details.join('，')}</span>
@@ -1646,9 +2016,9 @@ export default function MahjongApp() {
         <div className="p-4 border-b border-neutral-800 bg-neutral-950 flex justify-between items-center">
           <div>
             <h1 className="text-lg font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-amber-500">
-              技能麻将 · 完整版
+              技能麻将 · 五大角色版
             </h1>
-            <p className="text-[11px] text-gray-400">4花解锁碰牌 · 实时听牌助手</p>
+            <p className="text-[11px] text-gray-400">新增「阿姨」· 步步生花额外回合</p>
           </div>
           <button
             onClick={() => startNewGame(selectedHumanRole, aiDifficulty)}
@@ -1665,9 +2035,9 @@ export default function MahjongApp() {
             <Info size={14} className="mr-1.5 text-yellow-400" /> 核心规则速览
           </div>
           <ul className="list-disc pl-4 space-y-1 text-gray-400 text-[11px]">
-            <li><strong className="text-pink-400">20张花牌：</strong>8花 + 中、发、白，抽到自动亮出并补牌。</li>
-            <li><strong className="text-amber-400">4花解锁碰牌：</strong>未满4花可先碰牌，但凑齐4花前无法胡含碰的牌型（吃牌不受限）。</li>
-            <li><strong className="text-blue-400">杠牌规则：</strong>明杠算1张花牌，暗杠不算花牌（典当师暗刻算1花）。</li>
+            <li><strong className="text-pink-400">花牌补牌：</strong>8花 + 中、发、白（灵风含北风）算花牌，抽到自动置入花牌区并补1张手牌。</li>
+            <li><strong className="text-amber-400">4花解锁碰牌：</strong>每个玩家满4花时所“碰”的牌才生效；含“碰”牌型满4花前不能胡牌。</li>
+            <li><strong className="text-blue-400">杠牌规则：</strong>明杠算1张花牌，暗杠不算花牌。</li>
           </ul>
 
           {humanPlayer && (
@@ -1699,12 +2069,12 @@ export default function MahjongApp() {
       {/* ================== 弹窗 1：开局选择角色与 AI 难度 ================== */}
       {showRoleSelectModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4 overflow-y-auto">
-          <div className="bg-neutral-900 border-2 border-yellow-600/60 rounded-3xl max-w-3xl w-full p-5 md:p-7 shadow-2xl my-auto">
+          <div className="bg-neutral-900 border-2 border-yellow-600/60 rounded-3xl max-w-4xl w-full p-5 md:p-7 shadow-2xl my-auto">
             <h2 className="text-2xl md:text-3xl font-black text-center text-white mb-1">
               选择角色与 AI 难度
             </h2>
             <p className="text-center text-gray-400 text-xs mb-4">
-              每位角色开局拥有 2 枚技能币，最新技能与手牌恒等校验已全面实装
+              每位角色开局拥有 2 枚技能币 · 全新角色「阿姨」已加入牌局
             </p>
 
             {/* AI 难度选择栏 */}
@@ -1738,9 +2108,9 @@ export default function MahjongApp() {
 
             {/* 角色选择栏 */}
             <div className="text-xs font-bold text-gray-300 mb-2 flex items-center">
-              <Users size={14} className="mr-1.5 text-yellow-400" /> 选择你的角色：
+              <Users size={14} className="mr-1.5 text-yellow-400" /> 选择你的角色（5选1，其余随机分配给3名AI）：
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 mb-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
               {Object.values(ROLES_INFO).map(role => {
                 const isSelected = selectedHumanRole === role.name;
                 return (
@@ -1760,13 +2130,13 @@ export default function MahjongApp() {
                       </div>
                       {isSelected && <Check size={18} className="text-yellow-400" />}
                     </div>
-                    <div className="text-xs text-gray-200 mb-1">
+                    <div className="text-xs text-gray-200 mb-1 leading-relaxed">
                       <span className="bg-yellow-500/20 text-yellow-300 px-1.5 py-0.5 rounded mr-1 font-bold">
                         {role.activeName}
                       </span>
                       {role.activeDesc}
                     </div>
-                    <div className="text-xs text-gray-400">
+                    <div className="text-xs text-gray-400 leading-relaxed">
                       <span className="bg-pink-500/20 text-pink-300 px-1.5 py-0.5 rounded mr-1 font-bold">
                         被动·{role.passiveName}
                       </span>
@@ -1879,7 +2249,6 @@ export default function MahjongApp() {
             </p>
             <div className="flex flex-wrap justify-center gap-2 mb-5">
               {humanPlayer.hand.map((t, idx) => {
-                // 避免玩家误把唯一那张真牌当成废牌点掉（若手里只有1张目标牌，则将该张标记为自动配对不可作为废牌）
                 const targetTile = pendingReactions.discardRecord.tile;
                 const firstTargetIdx = humanPlayer.hand.indexOf(targetTile);
                 const isReservedTarget = idx === firstTargetIdx;
