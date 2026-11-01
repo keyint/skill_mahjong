@@ -19,8 +19,43 @@ import {
   Lock,
   Calculator,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Timer,
+  Globe,
+  Copy,
+  Play,
+  Pause
 } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import {
+  getAuth,
+  signInAnonymously,
+  signInWithCustomToken,
+  onAuthStateChanged
+} from 'firebase/auth';
+import {
+  getFirestore,
+  doc,
+  setDoc,
+  getDoc,
+  onSnapshot
+} from 'firebase/firestore';
+
+// --- 云端同步初始化 (支持跨设备联机 + 本地跨标签页 BroadcastChannel 双通道同步) ---
+let db = null;
+let auth = null;
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'skill-mahjong-online';
+
+try {
+  if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+    const firebaseConfig = JSON.parse(__firebase_config);
+    const firebaseApp = initializeApp(firebaseConfig);
+    auth = getAuth(firebaseApp);
+    db = getFirestore(firebaseApp);
+  }
+} catch (err) {
+  console.warn('Cloud sync fallback to local BroadcastChannel:', err);
+}
 
 // --- 常量与牌库定义 ---
 const SUITS = ['万', '筒', '条'];
@@ -72,7 +107,7 @@ const ROLES_INFO = {
     activeName: '乘风 (1币)',
     activeDesc: '无视上下家，当场上任意玩家打出一张牌时，灵风可以选择吃牌并跳转到灵风的轮次。',
     passiveName: '北风，北北风',
-    passiveDesc: '灵风抽取的每一张北风牌自动算作 1 张花牌（自动置入花牌区并补牌）。'
+    passiveDesc: '灵风抽取的每一张北风牌自动算作 1 张花牌（自动置入花牌区并补牌），且拥有的其余风牌（东、南、西风）每张额外算作 0.5 张花牌。'
   },
   '典当师': {
     name: '典当师',
@@ -167,7 +202,7 @@ const drawAndResolveFlowers = (deck, count, role = null) => {
   return { drawnHand, drawnFlowers, remainingDeck: currentDeck };
 };
 
-// 计算某玩家当前总有效花牌数
+// 计算某玩家当前总有效花牌数（新增：灵风其余风牌东/南/西每张算 0.5 花）
 const getFlowerBreakdown = (player) => {
   const baseFlowers = player.flowerTiles.length;
   const mingGangCount = player.melds.filter(m => m.type === 'minggang').length;
@@ -179,6 +214,15 @@ const getFlowerBreakdown = (player) => {
     const normalFlowers = baseFlowers - northInFlowers;
     details.push(`常规花牌: ${normalFlowers}`);
     if (northInFlowers > 0) details.push(`北风花牌: +${northInFlowers}`);
+
+    // 统计灵风拥有的其余风牌（东风、南风、西风，包含手牌、副露、弃牌）每张算 0.5 花
+    const isOtherWind = (t) => t === '东风' || t === '南风' || t === '西风';
+    const handOtherWinds = player.hand.filter(isOtherWind).length;
+    const meldOtherWinds = player.melds.reduce((acc, m) => acc + m.tiles.filter(isOtherWind).length, 0);
+    const discardOtherWinds = (player.discards || []).filter(isOtherWind).length;
+    const otherWindBonus = (handOtherWinds + meldOtherWinds + discardOtherWinds) * 0.5;
+    bonus += otherWindBonus;
+    if (otherWindBonus > 0) details.push(`其余风牌(0.5/张): +${otherWindBonus}`);
   } else {
     details.push(`实体花牌: ${baseFlowers}`);
   }
@@ -207,20 +251,18 @@ const getFlowerBreakdown = (player) => {
   };
 };
 
-// --- 完备无死角胡牌算法 (递归回溯支持复杂多面听、7小对、3x4+2、4花解锁碰牌、售罄禁胡校验) ---
+// --- 完备无死角胡牌算法 ---
 const canFormSets = (tiles) => {
   if (tiles.length === 0) return true;
   const sorted = sortHandTiles(tiles);
   const first = sorted[0];
 
-  // 分支1：尝试将第一张牌作为刻子(3张相同)移除
   if (sorted.filter(t => t === first).length >= 3) {
     const next = [...sorted];
     for (let i = 0; i < 3; i++) next.splice(next.indexOf(first), 1);
     if (canFormSets(next)) return true;
   }
 
-  // 分支2：尝试将第一张牌作为顺子(同花色连续3张)移除
   const suit = getTileSuit(first);
   if (SUITS.includes(suit)) {
     const num = parseInt(first[0], 10);
@@ -239,7 +281,6 @@ const canFormSets = (tiles) => {
   return false;
 };
 
-// 仅判断牌型本身是否满足 3x4+2 或 七小对
 const isPureMahjongWinPattern = (handTiles, meldCount) => {
   if (meldCount === 0 && handTiles.length === 14) {
     const counts = {};
@@ -267,7 +308,6 @@ const isPureMahjongWinPattern = (handTiles, meldCount) => {
   return { valid: false };
 };
 
-// 完整胡牌判定（含4花解锁碰牌限制 + 典当师售罄禁胡限制）
 const checkCanHu = (player, extraTile = null, bannedSuitInfo = null) => {
   const allHand = extraTile ? [...player.hand, extraTile] : [...player.hand];
   const meldCount = player.melds.length;
@@ -304,12 +344,11 @@ const checkCanHu = (player, extraTile = null, bannedSuitInfo = null) => {
   return { canHu: true, type: typeLabel, lockedReason: null };
 };
 
-// 计算玩家当前听哪些牌
 const getTingTiles = (player, bannedSuitInfo = null) => {
   if (player.hand.length + player.melds.length * 3 !== 13) return [];
   const tingList = [];
   for (let candidate of ALL_PLAYABLE_TILES) {
-    if (player.role === '灵风' && candidate === '北风') continue; // 灵风北风自动补花
+    if (player.role === '灵风' && candidate === '北风') continue;
     const patternRes = isPureMahjongWinPattern([...player.hand, candidate], player.melds.length);
     if (patternRes.valid) {
       const fullCheck = checkCanHu(player, candidate, bannedSuitInfo);
@@ -323,7 +362,6 @@ const getTingTiles = (player, bannedSuitInfo = null) => {
   return tingList;
 };
 
-// 检查可吃的组合
 const getValidChiCombinations = (hand, discardedTile, bannedSuit) => {
   const suit = getTileSuit(discardedTile);
   if (!SUITS.includes(suit)) return [];
@@ -349,8 +387,6 @@ const getValidChiCombinations = (hand, discardedTile, bannedSuit) => {
   return combos;
 };
 
-// 计算记牌器数据（阿姨被动：神机妙算）
-// 统计所有未知牌数量 = 初始总牌数 - 观测者手牌 - 全场弃牌河 - 全场副露(含麦咭替牌还原) - 全场亮出花牌
 const computeRemainingTileCounts = (players, viewerId = 0) => {
   const counts = {};
   ALL_PLAYABLE_TILES.forEach(t => counts[t] = 4);
@@ -369,15 +405,11 @@ const computeRemainingTileCounts = (players, viewerId = 0) => {
   };
 
   players.forEach(p => {
-    // 1. 观测者自己的手牌已知
     if (p.id === viewerId) {
       p.hand.forEach(deduct);
     }
-    // 2. 全场打出的弃牌已知
     p.discards.forEach(deduct);
-    // 3. 全场亮出的花牌已知
     p.flowerTiles.forEach(deduct);
-    // 4. 全场副露已知（注意麦咭刻意求工的第3张牌实际消耗的是 fakeTile）
     p.melds.forEach(m => {
       if (m.fakeTile) {
         deduct(m.tiles[0]);
@@ -393,6 +425,21 @@ const computeRemainingTileCounts = (players, viewerId = 0) => {
 };
 
 export default function App() {
+  // --- 模式与联机状态 ---
+  const [gameMode, setGameMode] = useState('SINGLE'); // 'SINGLE' | 'ONLINE'
+  const [user, setUser] = useState(null);
+  const [playerName, setPlayerName] = useState('雀神玩家');
+  const [roomCode, setRoomCode] = useState('');
+  const [activeRoomCode, setActiveRoomCode] = useState('');
+  const [mySeatId, setMySeatId] = useState(0); // 本地玩家座位号 (0-3)
+  const [roomSeats, setRoomSeats] = useState([
+    { seatId: 0, uid: 'local', name: '雀神玩家', role: '阿姨', isAI: false },
+    { seatId: 1, uid: null, name: 'AI-1 (待加入)', role: '麦咭', isAI: true },
+    { seatId: 2, uid: null, name: 'AI-2 (待加入)', role: '灵风', isAI: true },
+    { seatId: 3, uid: null, name: 'AI-3 (待加入)', role: '典当师', isAI: true }
+  ]);
+  const [copySuccess, setCopySuccess] = useState(false);
+
   // --- 游戏核心状态 ---
   const [selectedHumanRole, setSelectedHumanRole] = useState('阿姨');
   const [aiDifficulty, setAiDifficulty] = useState('NORMAL');
@@ -401,23 +448,21 @@ export default function App() {
   const [deck, setDeck] = useState([]);
   const [players, setPlayers] = useState([]);
   const [turn, setTurn] = useState(0);
-  // 出牌顺序方向：1 代表逆时针默认顺序 (0->1->2->3->0)，-1 代表顺时针反转顺序 (0->3->2->1->0)
   const [turnDirection, setTurnDirection] = useState(1);
   const [gamePhase, setGamePhase] = useState('ROLE_SELECT');
   // ROLE_SELECT, DRAW, ACTION, REACTION, LAOQIAN_EXTRA_PROMPT, SKILL_MODAL, WINNER, DRAW_GAME
 
+  // --- 30秒出牌倒计时状态 ---
+  const [timeLeft, setTimeLeft] = useState(30);
+  const [timerEnabled, setTimerEnabled] = useState(true);
+
   const [logs, setLogs] = useState([]);
-  const [lastDiscard, setLastDiscard] = useState(null); // { playerId, role, tile }
-  const [bannedSuitInfo, setBannedSuitInfo] = useState(null); // { suit: '万', ownerId: 3 }
+  const [lastDiscard, setLastDiscard] = useState(null);
+  const [bannedSuitInfo, setBannedSuitInfo] = useState(null);
   const [winnerInfo, setWinnerInfo] = useState(null);
 
-  // 老千《步步生花》额外摸打预约或响应状态
   const [laoqianExtraQueued, setLaoqianExtraQueued] = useState(false);
-
-  // 阿姨《神机妙算》记牌器面板展开状态
   const [showCardCounter, setShowCardCounter] = useState(true);
-
-  // 手动理牌状态
   const [selectedHandIdx, setSelectedHandIdx] = useState(null);
 
   // 弹窗与技能交互状态
@@ -428,6 +473,129 @@ export default function App() {
   const [pendingReactions, setPendingReactions] = useState(null);
 
   const logsEndRef = useRef(null);
+  const broadcastChannelRef = useRef(null);
+  const isApplyingRemoteRef = useRef(false);
+
+  // 1. Firebase 匿名登录与本地 BroadcastChannel 初始化
+  useEffect(() => {
+    if (auth) {
+      const initAuth = async () => {
+        try {
+          if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+            await signInWithCustomToken(auth, __initial_auth_token);
+          } else {
+            await signInAnonymously(auth);
+          }
+        } catch (e) {
+          console.warn('Auth fallback:', e);
+        }
+      };
+      initAuth();
+      const unsubscribe = onAuthStateChanged(auth, setUser);
+      return () => unsubscribe();
+    }
+  }, []);
+
+  // 2. 监听联机房间状态 (支持 Firestore 跨网同步 + BroadcastChannel 同浏览器多开测试)
+  useEffect(() => {
+    if (gameMode !== 'ONLINE' || !activeRoomCode) return;
+
+    // 通道 A：本地多标签页 BroadcastChannel 实时同步
+    if (typeof BroadcastChannel !== 'undefined') {
+      const bc = new BroadcastChannel(`mahjong_room_${activeRoomCode}`);
+      broadcastChannelRef.current = bc;
+      bc.onmessage = (event) => {
+        const data = event.data;
+        if (data && data.type === 'ROOM_SYNC') {
+          applyRemoteRoomState(data.payload);
+        }
+      };
+    }
+
+    // 通道 B：Firebase Firestore 云端房间实时监听
+    let unsubFirestore = null;
+    if (db && user) {
+      const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'mahjong_rooms', activeRoomCode);
+      unsubFirestore = onSnapshot(
+        roomRef,
+        (snapshot) => {
+          if (snapshot.exists()) {
+            applyRemoteRoomState(snapshot.data());
+          }
+        },
+        (err) => console.warn('Firestore room snapshot error:', err)
+      );
+    }
+
+    return () => {
+      if (broadcastChannelRef.current) {
+        broadcastChannelRef.current.close();
+        broadcastChannelRef.current = null;
+      }
+      if (unsubFirestore) unsubFirestore();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gameMode, activeRoomCode, user]);
+
+  // 应用远端同步过来的房间状态
+  const applyRemoteRoomState = (remote) => {
+    if (!remote) return;
+    isApplyingRemoteRef.current = true;
+    if (remote.roomSeats) setRoomSeats(JSON.parse(remote.roomSeats));
+    if (remote.aiDifficulty) setAiDifficulty(remote.aiDifficulty);
+
+    if (remote.gameStarted) {
+      setShowRoleSelectModal(false);
+      if (remote.deck) setDeck(JSON.parse(remote.deck));
+      if (remote.players) setPlayers(JSON.parse(remote.players));
+      if (remote.turn !== undefined) setTurn(remote.turn);
+      if (remote.turnDirection !== undefined) setTurnDirection(remote.turnDirection);
+      if (remote.gamePhase) setGamePhase(remote.gamePhase);
+      if (remote.logs) setLogs(JSON.parse(remote.logs));
+      if (remote.lastDiscard !== undefined) setLastDiscard(remote.lastDiscard ? JSON.parse(remote.lastDiscard) : null);
+      if (remote.bannedSuitInfo !== undefined) setBannedSuitInfo(remote.bannedSuitInfo ? JSON.parse(remote.bannedSuitInfo) : null);
+      if (remote.winnerInfo !== undefined) setWinnerInfo(remote.winnerInfo ? JSON.parse(remote.winnerInfo) : null);
+      if (remote.pendingReactions !== undefined) setPendingReactions(remote.pendingReactions ? JSON.parse(remote.pendingReactions) : null);
+    }
+    setTimeout(() => {
+      isApplyingRemoteRef.current = false;
+    }, 60);
+  };
+
+  // 推送房间最新状态到云端与其它客户端
+  const pushRoomState = async (overrides = {}) => {
+    if (gameMode !== 'ONLINE' || !activeRoomCode || isApplyingRemoteRef.current) return;
+
+    const payload = {
+      roomSeats: JSON.stringify(overrides.roomSeats || roomSeats),
+      aiDifficulty: overrides.aiDifficulty || aiDifficulty,
+      gameStarted: overrides.gameStarted !== undefined ? overrides.gameStarted : !showRoleSelectModal,
+      deck: JSON.stringify(overrides.deck || deck),
+      players: JSON.stringify(overrides.players || players),
+      turn: overrides.turn !== undefined ? overrides.turn : turn,
+      turnDirection: overrides.turnDirection !== undefined ? overrides.turnDirection : turnDirection,
+      gamePhase: overrides.gamePhase || gamePhase,
+      logs: JSON.stringify(overrides.logs || logs),
+      lastDiscard: JSON.stringify(overrides.lastDiscard !== undefined ? overrides.lastDiscard : lastDiscard),
+      bannedSuitInfo: JSON.stringify(overrides.bannedSuitInfo !== undefined ? overrides.bannedSuitInfo : bannedSuitInfo),
+      winnerInfo: JSON.stringify(overrides.winnerInfo !== undefined ? overrides.winnerInfo : winnerInfo),
+      pendingReactions: JSON.stringify(overrides.pendingReactions !== undefined ? overrides.pendingReactions : pendingReactions),
+      updatedAt: Date.now()
+    };
+
+    if (broadcastChannelRef.current) {
+      broadcastChannelRef.current.postMessage({ type: 'ROOM_SYNC', payload });
+    }
+
+    if (db && user) {
+      try {
+        const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'mahjong_rooms', activeRoomCode);
+        await setDoc(roomRef, payload, { merge: true });
+      } catch (e) {
+        console.warn('Failed to sync state to cloud:', e);
+      }
+    }
+  };
 
   useEffect(() => {
     if (logsEndRef.current) {
@@ -439,45 +607,253 @@ export default function App() {
     setLogs(prev => [...prev, msg]);
   };
 
+  // --- 30秒出牌倒计时核心逻辑 ---
+  useEffect(() => {
+    if (['DRAW', 'ACTION', 'REACTION', 'LAOQIAN_EXTRA_PROMPT', 'SKILL_MODAL'].includes(gamePhase) && !showRoleSelectModal) {
+      setTimeLeft(30);
+    }
+  }, [turn, gamePhase, showRoleSelectModal]);
+
+  useEffect(() => {
+    if (!timerEnabled || showRoleSelectModal) return;
+    if (!['DRAW', 'ACTION', 'REACTION', 'LAOQIAN_EXTRA_PROMPT', 'SKILL_MODAL'].includes(gamePhase)) return;
+
+    const interval = setInterval(() => {
+      setTimeLeft(prev => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          handleTurnTimeout();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turn, gamePhase, timerEnabled, showRoleSelectModal, pendingReactions, qianshuData, players]);
+
+  // 当30秒倒计时归零时自动执行默认操作
+  const handleTurnTimeout = () => {
+    // 1. 响应阶段超时：如果是等待当前客户端玩家响应，自动选择“过”
+    if (gamePhase === 'REACTION' && pendingReactions) {
+      if (pendingReactions.responderId === undefined || pendingReactions.responderId === mySeatId) {
+        addLog(`⏰ [${players[mySeatId]?.role}] 响应思考超时（30秒），系统已自动选择【过】！`);
+        handleHumanPassReaction();
+      }
+      return;
+    }
+
+    // 2. 老千步步生花询问超时：自动放弃额外摸打并推进回合
+    if (gamePhase === 'LAOQIAN_EXTRA_PROMPT' && turn === mySeatId) {
+      addLog(`⏰ [${players[mySeatId]?.role}] 步步生花确认超时（30秒），自动结束本回合！`);
+      const nextId = getNextPlayerId(mySeatId, turnDirection);
+      advanceTurn(nextId, players);
+      return;
+    }
+
+    // 3. 当前轮到本机玩家操作超时
+    if (turn === mySeatId) {
+      const me = players[mySeatId];
+      if (!me) return;
+
+      if (gamePhase === 'DRAW') {
+        addLog(`⏰ [${me.role}] 摸牌超时（30秒），系统自动执行摸牌！`);
+        handleDrawTile(mySeatId);
+      } else if (gamePhase === 'SKILL_MODAL' && qianshuData) {
+        addLog(`⏰ [${me.role}] 千术操作超时（30秒），系统自动确认千术！`);
+        handleConfirmQianshu();
+      } else if (gamePhase === 'ACTION') {
+        let discardIdx = me.hand.length - 1;
+        for (let i = me.hand.length - 1; i >= 0; i--) {
+          if (canPlayerDiscardTile(me, me.hand[i])) {
+            discardIdx = i;
+            break;
+          }
+        }
+        addLog(`⏰ [${me.role}] 出牌超时（30秒），系统自动打出【${me.hand[discardIdx]}】！`);
+        executeDiscard(mySeatId, discardIdx);
+      }
+    }
+  };
+
   // 获取某玩家的当前“下家”与“上家”座位号（随风水轮流转动态变化）
   const getNextPlayerId = (currentId, dir = turnDirection) => (currentId + dir + 4) % 4;
   const getUpperPlayerId = (currentId, dir = turnDirection) => (currentId - dir + 4) % 4;
 
-  // --- 初始化对局 ---
-  const startNewGame = (chosenRole = selectedHumanRole, chosenDiff = aiDifficulty) => {
-    const allRoles = ['老千', '麦咭', '灵风', '典当师', '阿姨'];
-    const remainingRoles = allRoles.filter(r => r !== chosenRole);
-    for (let i = remainingRoles.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [remainingRoles[i], remainingRoles[j]] = [remainingRoles[j], remainingRoles[i]];
+  // --- 创建或加入联机房间 ---
+  const handleCreateOrJoinRoom = async (targetCode) => {
+    const cleanCode = (targetCode || roomCode || Math.floor(1000 + Math.random() * 9000).toString()).trim().toUpperCase();
+    setRoomCode(cleanCode);
+    setActiveRoomCode(cleanCode);
+
+    const myUid = user?.uid || `local_${Math.random().toString(36).slice(2, 7)}`;
+
+    if (db && user) {
+      try {
+        const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'mahjong_rooms', cleanCode);
+        const snap = await getDoc(roomRef);
+        if (snap.exists()) {
+          const data = snap.data();
+          const existingSeats = data.roomSeats ? JSON.parse(data.roomSeats) : roomSeats;
+          // 查找空位或已存在座位
+          let assignedSeat = existingSeats.findIndex(s => s.uid === myUid);
+          if (assignedSeat === -1) {
+            assignedSeat = existingSeats.findIndex(s => s.isAI);
+          }
+          if (assignedSeat === -1) assignedSeat = 0;
+
+          const usedRoles = existingSeats.filter((_, i) => i !== assignedSeat).map(s => s.role);
+          const availableRole = !usedRoles.includes(selectedHumanRole)
+            ? selectedHumanRole
+            : Object.keys(ROLES_INFO).find(r => !usedRoles.includes(r)) || '麦咭';
+
+          const updatedSeats = existingSeats.map((s, idx) =>
+            idx === assignedSeat
+              ? { seatId: idx, uid: myUid, name: playerName || `玩家${idx + 1}`, role: availableRole, isAI: false }
+              : s
+          );
+
+          setMySeatId(assignedSeat);
+          setSelectedHumanRole(availableRole);
+          setRoomSeats(updatedSeats);
+          await setDoc(roomRef, { roomSeats: JSON.stringify(updatedSeats) }, { merge: true });
+          return;
+        }
+      } catch (e) {
+        console.warn('Join room cloud check failed:', e);
+      }
     }
 
+    // 初始化为房主 (座位 0)
+    const allRoles = Object.keys(ROLES_INFO);
+    const otherRoles = allRoles.filter(r => r !== selectedHumanRole);
+    const initSeats = [
+      { seatId: 0, uid: myUid, name: playerName || '房主', role: selectedHumanRole, isAI: false },
+      { seatId: 1, uid: null, name: 'AI-1 (可加入)', role: otherRoles[0], isAI: true },
+      { seatId: 2, uid: null, name: 'AI-2 (可加入)', role: otherRoles[1], isAI: true },
+      { seatId: 3, uid: null, name: 'AI-3 (可加入)', role: otherRoles[2], isAI: true }
+    ];
+    setMySeatId(0);
+    setRoomSeats(initSeats);
+    pushRoomState({ roomSeats: initSeats, gameStarted: false });
+  };
+
+  // 联机大厅切换座位或角色
+  const handleSelectOnlineSeat = (targetSeatId) => {
+    const myUid = user?.uid || 'local';
+    const updated = roomSeats.map(s => {
+      if (s.seatId === targetSeatId) {
+        return { seatId: targetSeatId, uid: myUid, name: playerName || `玩家${targetSeatId + 1}`, role: selectedHumanRole, isAI: false };
+      }
+      if (s.seatId === mySeatId) {
+        return { seatId: mySeatId, uid: null, name: `AI-${mySeatId} (可加入)`, role: s.role, isAI: true };
+      }
+      return s;
+    });
+    setMySeatId(targetSeatId);
+    setRoomSeats(updated);
+    pushRoomState({ roomSeats: updated, gameStarted: false });
+  };
+
+  const handleChangeRoleInLobby = (newRole) => {
+    setSelectedHumanRole(newRole);
+    if (gameMode === 'ONLINE' && activeRoomCode) {
+      const updated = roomSeats.map(s =>
+        s.seatId === mySeatId ? { ...s, role: newRole, name: playerName } : s
+      );
+      setRoomSeats(updated);
+      pushRoomState({ roomSeats: updated, gameStarted: false });
+    }
+  };
+
+  // --- 初始化对局 (支持单机 AI 与联机多人房间) ---
+  const startNewGame = (chosenRole = selectedHumanRole, chosenDiff = aiDifficulty) => {
+    const allRoles = ['老千', '麦咭', '灵风', '典当师', '阿姨'];
     let freshDeck = generatePureRandomDeck();
     const positions = ['bottom', 'right', 'top', 'left'];
-    const seatRoles = [chosenRole, ...remainingRoles.slice(0, 3)];
 
-    const initPlayers = seatRoles.map((role, idx) => {
-      const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(freshDeck, 13, role);
-      freshDeck = remainingDeck;
-      return {
-        id: idx,
-        name: idx === 0 ? '你' : `AI-${idx}`,
-        role,
-        isAI: idx !== 0,
-        coins: 2,
-        hand: sortHandTiles(drawnHand),
-        flowerTiles: drawnFlowers,
-        melds: [],
-        discards: [],
-        isFrozen: false, // 阿姨「闲人免进」1巡禁动标记
-        position: positions[idx]
-      };
+    let initPlayers = [];
+
+    if (gameMode === 'ONLINE' && activeRoomCode) {
+      // 联机模式：确保4个座位角色不重复，空位由 AI 替补
+      const usedRoles = new Set();
+      constresolvedSeats = roomSeats.map((seat, idx) => {
+        let r = seat.role;
+        if (usedRoles.has(r)) {
+          r = allRoles.find(cand => !usedRoles.has(cand)) || r;
+        }
+        usedRoles.add(r);
+        return { ...seat, role: r, id: idx };
+      });
+
+      initPlayers = resolvedSeats.map((seat, idx) => {
+        const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(freshDeck, 13, seat.role);
+        freshDeck = remainingDeck;
+        return {
+          id: idx,
+          name: seat.isAI ? `AI-${idx}` : seat.name,
+          role: seat.role,
+          isAI: seat.isAI,
+          coins: 2,
+          hand: sortHandTiles(drawnHand),
+          flowerTiles: drawnFlowers,
+          melds: [],
+          discards: [],
+          isFrozen: false,
+          position: positions[idx]
+        };
+      });
+    } else {
+      // 单机模式：本机固定为座位 0
+      setMySeatId(0);
+      const remainingRoles = allRoles.filter(r => r !== chosenRole);
+      for (let i = remainingRoles.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [remainingRoles[i], remainingRoles[j]] = [remainingRoles[j], remainingRoles[i]];
+      }
+      const seatRoles = [chosenRole, ...remainingRoles.slice(0, 3)];
+
+      initPlayers = seatRoles.map((role, idx) => {
+        const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(freshDeck, 13, role);
+        freshDeck = remainingDeck;
+        return {
+          id: idx,
+          name: idx === 0 ? '你' : `AI-${idx}`,
+          role,
+          isAI: idx !== 0,
+          coins: 2,
+          hand: sortHandTiles(drawnHand),
+          flowerTiles: drawnFlowers,
+          melds: [],
+          discards: [],
+          isFrozen: false,
+          position: positions[idx]
+        };
+      });
+    }
+
+    const initialLogs = [
+      `🎲 牌局开始！模式：【${gameMode === 'ONLINE' ? `联机房 #${activeRoomCode}` : AI_DIFFICULTIES[chosenDiff].name}】，每步限时 30 秒。`,
+      `👤 你的座位：${mySeatId}号位【${initPlayers[mySeatId]?.role}】，开局拥有 2 枚技能币。`
+    ];
+    initPlayers.forEach(p => {
+      if (p.role === '灵风') {
+        const northCount = p.flowerTiles.filter(t => t === '北风').length;
+        if (northCount > 0) {
+          initialLogs.push(`🌪️ 【灵风】开局触发《北风，北北风》，摸到的 ${northCount} 张【北风】已自动置入花牌区并补牌！`);
+        }
+      }
     });
+    if (initPlayers[mySeatId]?.role === '阿姨') {
+      initialLogs.push(`🧮 【阿姨】被动《神机妙算》已激活！记牌器已为你实时开启。`);
+    }
 
     setDeck(freshDeck);
     setPlayers(initPlayers);
     setTurn(0);
     setTurnDirection(1);
+    setTimeLeft(30);
     setLastDiscard(null);
     setBannedSuitInfo(null);
     setWinnerInfo(null);
@@ -489,45 +865,46 @@ export default function App() {
     setLingfengCombos(null);
     setPawnModal(false);
     setShowRoleSelectModal(false);
-    setShowCardCounter(chosenRole === '阿姨');
+    setShowCardCounter(initPlayers[mySeatId]?.role === '阿姨');
     setGamePhase('DRAW');
-
-    const initialLogs = [
-      `🎲 牌局开始！AI难度：【${AI_DIFFICULTIES[chosenDiff].name}】，纯随机洗牌完成（144张）。`,
-      `👤 你选择了【${chosenRole}】，开局拥有 2 枚技能币。当前出牌顺序：逆时针（你 → 下家AI-1 → 对家AI-2 → 上家AI-3）。`
-    ];
-    initPlayers.forEach(p => {
-      if (p.role === '灵风') {
-        const northCount = p.flowerTiles.filter(t => t === '北风').length;
-        if (northCount > 0) {
-          initialLogs.push(`🌪️ 【灵风】开局触发《北风，北北风》，摸到的 ${northCount} 张【北风】已自动置入花牌区并补牌！`);
-        }
-      }
-    });
-    if (chosenRole === '阿姨') {
-      initialLogs.push(`🧮 【阿姨】被动《神机妙算》已激活！记牌器已为你实时开启。`);
-    }
-    initialLogs.push(`👉 轮到你的回合，请摸牌或使用摸牌前技能。`);
     setLogs(initialLogs);
+
+    if (gameMode === 'ONLINE' && activeRoomCode) {
+      pushRoomState({
+        gameStarted: true,
+        deck: freshDeck,
+        players: initPlayers,
+        turn: 0,
+        turnDirection: 1,
+        gamePhase: 'DRAW',
+        logs: initialLogs,
+        lastDiscard: null,
+        bannedSuitInfo: null,
+        winnerInfo: null,
+        pendingReactions: null
+      });
+    }
   };
 
   // --- 回合推进（处理典当师封锁解除 & 阿姨「闲人免进」跳过下家1巡） ---
-  const advanceTurn = (targetPlayerId, currentPlayersState = players) => {
+  const advanceTurn = (targetPlayerId, currentPlayersState = players, customLogs = null) => {
     let actualNextId = targetPlayerId;
     let workingPlayers = [...currentPlayersState];
+    let nextBannedSuit = bannedSuitInfo;
+    let workingLogs = customLogs ? [...customLogs] : [...logs];
 
-    // 检查目标玩家是否正处于阿姨《闲人免进》冻结状态（最多连续检查4次防死循环）
     for (let step = 0; step < 4; step++) {
       const targetObj = workingPlayers[actualNextId];
       if (!targetObj) break;
 
-      if (bannedSuitInfo && bannedSuitInfo.ownerId === actualNextId) {
-        addLog(`🔓 轮回到【典当师】，「售罄」对【${bannedSuitInfo.suit}】花色的封锁已解除！`);
+      if (nextBannedSuit && nextBannedSuit.ownerId === actualNextId) {
+        workingLogs.push(`🔓 轮回到【典当师】，「售罄」对【${nextBannedSuit.suit}】花色的封锁已解除！`);
+        nextBannedSuit = null;
         setBannedSuitInfo(null);
       }
 
       if (targetObj.isFrozen) {
-        addLog(`⛔ [${targetObj.role}](${targetObj.name}) 受【阿姨·闲人免进】限制，本巡禁止任何行动，直接跳过回合！`);
+        workingLogs.push(`⛔ [${targetObj.role}](${targetObj.name}) 受【阿姨·闲人免进】限制，本巡禁止任何行动，直接跳过回合！`);
         workingPlayers = workingPlayers.map(p =>
           p.id === actualNextId ? { ...p, isFrozen: false } : p
         );
@@ -537,13 +914,25 @@ export default function App() {
       }
     }
 
+    setLogs(workingLogs);
     setPlayers(workingPlayers);
     setTurn(actualNextId);
     setSelectedHandIdx(null);
     setGamePhase('DRAW');
+
+    if (gameMode === 'ONLINE') {
+      pushRoomState({
+        players: workingPlayers,
+        turn: actualNextId,
+        gamePhase: 'DRAW',
+        bannedSuitInfo: nextBannedSuit,
+        logs: workingLogs,
+        pendingReactions: null
+      });
+    }
   };
 
-  // --- 摸牌动作（含灵风自动补北风、老千步步生花额外抽牌） ---
+  // --- 摸牌动作 ---
   const handleDrawTile = (playerId, isExtraFlowersSkill = false, customPlayers = null) => {
     const activePlayers = customPlayers || players;
     const targetPlayer = activePlayers[playerId];
@@ -571,16 +960,21 @@ export default function App() {
 
     setDeck(remainingDeck);
 
+    let nextLogs = [...logs];
     if (drawnFlowers.length > 0) {
       const hasNorth = targetPlayer.role === '灵风' && drawnFlowers.includes('北风');
       if (hasNorth) {
-        addLog(`🌪️ [灵风] 摸到花牌/北风 (${drawnFlowers.join('、')})，触发《北风，北北风》自动置入花牌区并补牌！`);
+        nextLogs.push(`🌪️ [灵风] 摸到花牌/北风 (${drawnFlowers.join('、')})，触发《北风，北北风》自动置入花牌区并补牌！`);
       } else {
-        addLog(`🌸 [${targetPlayer.role}] 摸到花牌 (${drawnFlowers.join('、')})，自动亮出并补牌！`);
+        nextLogs.push(`🌸 [${targetPlayer.role}] 摸到花牌 (${drawnFlowers.join('、')})，自动亮出并补牌！`);
       }
     }
 
-    setPlayers(prev => (customPlayers || prev).map(p => {
+    if (isExtraFlowersSkill) {
+      nextLogs.push(`🌺 [${targetPlayer.role}] 发动《步步生花》额外摸入1张牌，请继续出牌！`);
+    }
+
+    const updatedPlayers = activePlayers.map(p => {
       if (p.id === playerId) {
         return {
           ...p,
@@ -589,13 +983,20 @@ export default function App() {
         };
       }
       return p;
-    }));
+    });
 
-    if (isExtraFlowersSkill) {
-      addLog(`🌺 [${targetPlayer.role}] 发动《步步生花》额外摸入1张牌，请继续出牌！`);
-    }
-
+    setLogs(nextLogs);
+    setPlayers(updatedPlayers);
     setGamePhase('ACTION');
+
+    if (gameMode === 'ONLINE') {
+      pushRoomState({
+        deck: remainingDeck,
+        players: updatedPlayers,
+        gamePhase: 'ACTION',
+        logs: nextLogs
+      });
+    }
   };
 
   // --- 检查玩家是否被禁打某张牌 (典当师-售罄) ---
@@ -609,14 +1010,16 @@ export default function App() {
 
   // --- 手牌点击（支持理牌交换 + 出牌） ---
   const handleHumanTileClick = (index) => {
-    const human = players[0];
-    if (turn !== 0 || gamePhase !== 'ACTION') {
+    const human = players[mySeatId];
+    if (!human) return;
+
+    if (turn !== mySeatId || gamePhase !== 'ACTION') {
       if (selectedHandIdx === null) {
         setSelectedHandIdx(index);
       } else {
         if (selectedHandIdx !== index) {
           setPlayers(prev => prev.map(p => {
-            if (p.id === 0) {
+            if (p.id === mySeatId) {
               const newHand = [...p.hand];
               [newHand[selectedHandIdx], newHand[index]] = [newHand[index], newHand[selectedHandIdx]];
               return { ...p, hand: newHand };
@@ -635,11 +1038,11 @@ export default function App() {
       return;
     }
 
-    executeDiscard(0, index);
+    executeDiscard(mySeatId, index);
   };
 
   const handleAutoSortHumanHand = () => {
-    setPlayers(prev => prev.map(p => p.id === 0 ? { ...p, hand: sortHandTiles(p.hand) } : p));
+    setPlayers(prev => prev.map(p => p.id === mySeatId ? { ...p, hand: sortHandTiles(p.hand) } : p));
     setSelectedHandIdx(null);
   };
 
@@ -661,82 +1064,98 @@ export default function App() {
       return p;
     });
 
-    setPlayers(updatedPlayers);
     const discardRecord = { playerId, role: player.role, tile: discardedTile };
-    setLastDiscard(discardRecord);
-    addLog(`🀄 [${player.role}] 打出了 【${discardedTile}】`);
+    const nextLogs = [...logs, `🀄 [${player.role}] 打出了 【${discardedTile}】`];
 
-    evaluateReactionsAfterDiscard(updatedPlayers, discardRecord);
+    setPlayers(updatedPlayers);
+    setLastDiscard(discardRecord);
+    setLogs(nextLogs);
+
+    evaluateReactionsAfterDiscard(updatedPlayers, discardRecord, nextLogs);
   };
 
-  // --- 评估打出一张牌后的吃、碰、杠、胡与技能响应 ---
-  const evaluateReactionsAfterDiscard = (currentPlayers, discardRecord) => {
+  // --- 评估打出一张牌后的吃、碰、杠、胡与技能响应（支持多人类玩家座位） ---
+  const evaluateReactionsAfterDiscard = (currentPlayers, discardRecord, currentLogs = logs) => {
     const { playerId: discarderId, tile } = discardRecord;
     const tileSuit = getTileSuit(tile);
 
-    // 1. 优先检查人类玩家 (id === 0) 是否有可响应动作（若人类被阿姨「闲人免进」冻结，则禁止任何响应）
-    if (discarderId !== 0) {
-      const human = currentPlayers[0];
-      if (!human.isFrozen) {
-        const isSuitBannedForHuman = bannedSuitInfo && bannedSuitInfo.ownerId !== 0 && bannedSuitInfo.suit === tileSuit;
+    // 1. 检查所有非 AI 玩家是否有可响应动作
+    for (let step = 1; step <= 3; step++) {
+      const checkId = (discarderId + step * turnDirection + 4) % 4;
+      const candidate = currentPlayers[checkId];
+      if (!candidate || candidate.isAI || candidate.isFrozen) continue;
 
-        const huResult = checkCanHu(human, tile, bannedSuitInfo);
-        const sameTileCount = human.hand.filter(t => t === tile).length;
+      const isSuitBanned = bannedSuitInfo && bannedSuitInfo.ownerId !== checkId && bannedSuitInfo.suit === tileSuit;
+      const huResult = checkCanHu(candidate, tile, bannedSuitInfo);
+      const sameTileCount = candidate.hand.filter(t => t === tile).length;
 
-        const canNormalPeng = !isSuitBannedForHuman && sameTileCount >= 2;
-        const canMingGang = !isSuitBannedForHuman && sameTileCount === 3;
-        const canMaijiPeng = !isSuitBannedForHuman && human.role === '麦咭' && human.coins >= 1 && sameTileCount >= 1 && human.hand.length >= 2;
+      const canNormalPeng = !isSuitBanned && sameTileCount >= 2;
+      const canMingGang = !isSuitBanned && sameTileCount === 3;
+      const canMaijiPeng = !isSuitBanned && candidate.role === '麦咭' && candidate.coins >= 1 && sameTileCount >= 1 && candidate.hand.length >= 2;
 
-        // 动态计算人类的上家是谁（受阿姨风水轮流转影响）
-        const humanUpperId = getUpperPlayerId(0, turnDirection);
-        const chiCombos = getValidChiCombinations(human.hand, tile, isSuitBannedForHuman ? tileSuit : null);
-        const canNormalChi = discarderId === humanUpperId && chiCombos.length > 0;
-        const canLingfengChi = discarderId !== humanUpperId && human.role === '灵风' && human.coins >= 1 && chiCombos.length > 0;
+      const candidateUpperId = getUpperPlayerId(checkId, turnDirection);
+      const chiCombos = getValidChiCombinations(candidate.hand, tile, isSuitBanned ? tileSuit : null);
+      const canNormalChi = discarderId === candidateUpperId && chiCombos.length > 0;
+      const canLingfengChi = discarderId !== candidateUpperId && candidate.role === '灵风' && candidate.coins >= 1 && chiCombos.length > 0;
 
-        const hasLockedHuHint = !huResult.canHu && Boolean(huResult.lockedReason);
+      const hasLockedHuHint = !huResult.canHu && Boolean(huResult.lockedReason);
 
-        if (huResult.canHu || hasLockedHuHint || canNormalPeng || canMingGang || canMaijiPeng || canNormalChi || canLingfengChi) {
-          setPendingReactions({
-            discardRecord,
-            canHu: huResult.canHu,
-            huType: huResult.type,
-            huLockedReason: huResult.lockedReason,
-            canNormalPeng,
-            canMingGang,
-            canMaijiPeng,
-            canNormalChi,
-            canLingfengChi,
-            chiCombos
+      if (huResult.canHu || hasLockedHuHint || canNormalPeng || canMingGang || canMaijiPeng || canNormalChi || canLingfengChi) {
+        const reactionObj = {
+          responderId: checkId,
+          discardRecord,
+          canHu: huResult.canHu,
+          huType: huResult.type,
+          huLockedReason: huResult.lockedReason,
+          canNormalPeng,
+          canMingGang,
+          canMaijiPeng,
+          canNormalChi,
+          canLingfengChi,
+          chiCombos
+        };
+        setPendingReactions(reactionObj);
+        setGamePhase('REACTION');
+        if (gameMode === 'ONLINE') {
+          pushRoomState({
+            players: currentPlayers,
+            lastDiscard: discardRecord,
+            pendingReactions: reactionObj,
+            gamePhase: 'REACTION',
+            logs: currentLogs
           });
-          setGamePhase('REACTION');
-          return;
         }
+        return;
       }
     }
 
-    // 2. 若人类无可响应或打牌者是人类，评估 AI 的响应
-    processAIReactions(currentPlayers, discardRecord);
+    // 2. 若无真人玩家响应，评估 AI 的响应
+    processAIReactions(currentPlayers, discardRecord, currentLogs);
   };
 
   // --- 当无人吃碰胡打断时，检查打牌者如果是「老千」且花牌 > 4，是否发动《步步生花》额外摸打 ---
-  const checkLaoqianExtraTurnOrAdvance = (currentPlayers, discarderId) => {
+  const checkLaoqianExtraTurnOrAdvance = (currentPlayers, discarderId, currentLogs = logs) => {
     const discarder = currentPlayers[discarderId];
     if (discarder && discarder.role === '老千') {
       const { total: totalFlw } = getFlowerBreakdown(discarder);
       if (totalFlw > 4 && discarder.flowerTiles.length > 0 && deck.length > 0) {
-        // 如果人类是老千
         if (!discarder.isAI) {
           if (laoqianExtraQueued) {
             setLaoqianExtraQueued(false);
-            executeLaoqianExtraTurn(0, currentPlayers);
+            executeLaoqianExtraTurn(discarderId, currentPlayers);
             return;
           } else {
-            // 弹出提示询问老千是否消耗1张花牌进行额外摸牌打牌
             setGamePhase('LAOQIAN_EXTRA_PROMPT');
+            if (gameMode === 'ONLINE') {
+              pushRoomState({
+                players: currentPlayers,
+                gamePhase: 'LAOQIAN_EXTRA_PROMPT',
+                logs: currentLogs
+              });
+            }
             return;
           }
         } else {
-          // 如果 AI 是老千，根据难度概率触发《步步生花》连续行动
           const extraProb = aiDifficulty === 'EASY' ? 0.35 : aiDifficulty === 'NORMAL' ? 0.75 : 0.95;
           if (Math.random() < extraProb) {
             setTimeout(() => {
@@ -748,12 +1167,10 @@ export default function App() {
       }
     }
 
-    // 正常推进到当前方向下的下一位玩家
     const nextId = getNextPlayerId(discarderId, turnDirection);
-    advanceTurn(nextId, currentPlayers);
+    advanceTurn(nextId, currentPlayers, currentLogs);
   };
 
-  // 执行老千《步步生花》：扣除1张实体花牌，立刻额外摸1张牌并留在老千的出牌阶段
   const executeLaoqianExtraTurn = (playerId, currentPlayersState = players) => {
     const target = currentPlayersState[playerId];
     if (!target || target.flowerTiles.length === 0) return;
@@ -771,8 +1188,8 @@ export default function App() {
     handleDrawTile(playerId, true, updatedPlayers);
   };
 
-  // --- AI 响应吃碰胡逻辑（受阿姨「闲人免进」与「风水轮流转」影响） ---
-  const processAIReactions = (currentPlayers, discardRecord) => {
+  // --- AI 响应吃碰胡逻辑 ---
+  const processAIReactions = (currentPlayers, discardRecord, currentLogs = logs) => {
     const { playerId: discarderId, tile } = discardRecord;
     const tileSuit = getTileSuit(tile);
 
@@ -780,24 +1197,29 @@ export default function App() {
     const pengProb = aiDifficulty === 'EASY' ? 0.35 : aiDifficulty === 'NORMAL' ? 0.7 : 0.95;
 
     // 1. 检查是否有未冻结的 AI 可以点炮胡牌
-    for (let i = 1; i <= 3; i++) {
+    for (let i = 0; i < 4; i++) {
       if (i === discarderId) continue;
       const ai = currentPlayers[i];
-      if (ai.isFrozen) continue; // 被阿姨闲人免进冻结，禁止胡牌
+      if (!ai || !ai.isAI || ai.isFrozen) continue;
       const huRes = checkCanHu(ai, tile, bannedSuitInfo);
       if (huRes.canHu) {
-        setWinnerInfo({ winner: ai, winType: `点炮胡 (${huRes.type})`, winningTile: tile });
+        const winObj = { winner: ai, winType: `点炮胡 (${huRes.type})`, winningTile: tile };
+        const winLogs = [...currentLogs, `🏆 [${ai.role}] 胡了 [${currentPlayers[discarderId].role}] 打出的【${tile}】(${huRes.type})！`];
+        setWinnerInfo(winObj);
         setGamePhase('WINNER');
-        addLog(`🏆 [${ai.role}] 胡了 [${currentPlayers[discarderId].role}] 打出的【${tile}】(${huRes.type})！`);
+        setLogs(winLogs);
+        if (gameMode === 'ONLINE') {
+          pushRoomState({ players: currentPlayers, winnerInfo: winObj, gamePhase: 'WINNER', logs: winLogs });
+        }
         return;
       }
     }
 
     // 2. 检查未冻结的 AI 碰牌或技能响应
-    for (let i = 1; i <= 3; i++) {
+    for (let i = 0; i < 4; i++) {
       if (i === discarderId) continue;
       const ai = currentPlayers[i];
-      if (ai.isFrozen) continue; // 被阿姨闲人免进冻结，禁止副露或响应技能
+      if (!ai || !ai.isAI || ai.isFrozen) continue;
 
       const isSuitBanned = bannedSuitInfo && bannedSuitInfo.ownerId !== ai.id && bannedSuitInfo.suit === tileSuit;
       if (isSuitBanned) continue;
@@ -808,7 +1230,7 @@ export default function App() {
       const flowerThreshold = aiDifficulty === 'HARD' ? 2.5 : 3;
       if (sameCount >= 2 && (aiFlowers >= flowerThreshold || ai.role === '麦咭') && Math.random() < pengProb) {
         setTimeout(() => {
-          setPlayers(prev => prev.map(p => {
+          const nextPlayers = currentPlayers.map(p => {
             if (p.id === ai.id) {
               const nextHand = [...p.hand];
               nextHand.splice(nextHand.indexOf(tile), 1);
@@ -820,10 +1242,15 @@ export default function App() {
               };
             }
             return p;
-          }));
-          addLog(`💥 [${ai.role}] 碰了 【${tile}】！进入出牌阶段。`);
+          });
+          const nextLogs = [...currentLogs, `💥 [${ai.role}] 碰了 【${tile}】！进入出牌阶段。`];
+          setPlayers(nextPlayers);
+          setLogs(nextLogs);
           setTurn(ai.id);
           setGamePhase('ACTION');
+          if (gameMode === 'ONLINE') {
+            pushRoomState({ players: nextPlayers, turn: ai.id, gamePhase: 'ACTION', logs: nextLogs, pendingReactions: null });
+          }
         }, 600);
         return;
       }
@@ -831,7 +1258,7 @@ export default function App() {
       // 麦咭 AI 发动【刻意求工】
       if (ai.role === '麦咭' && ai.coins >= 1 && sameCount === 1 && ai.hand.length >= 2 && Math.random() < skillProb) {
         setTimeout(() => {
-          setPlayers(prev => prev.map(p => {
+          const nextPlayers = currentPlayers.map(p => {
             if (p.id === ai.id) {
               const nextHand = [...p.hand];
               nextHand.splice(nextHand.indexOf(tile), 1);
@@ -849,10 +1276,15 @@ export default function App() {
               };
             }
             return p;
-          }));
-          addLog(`🔧 【麦咭】消耗1币发动《刻意求工》！用1张废牌强行碰出【${tile}】，轮到麦咭出牌！`);
+          });
+          const nextLogs = [...currentLogs, `🔧 【麦咭】消耗1币发动《刻意求工》！用1张废牌强行碰出【${tile}】，轮到麦咭出牌！`];
+          setPlayers(nextPlayers);
+          setLogs(nextLogs);
           setTurn(ai.id);
           setGamePhase('ACTION');
+          if (gameMode === 'ONLINE') {
+            pushRoomState({ players: nextPlayers, turn: ai.id, gamePhase: 'ACTION', logs: nextLogs, pendingReactions: null });
+          }
         }, 650);
         return;
       }
@@ -864,7 +1296,7 @@ export default function App() {
         if (combos.length > 0 && Math.random() < skillProb) {
           const chosenCombo = combos[0];
           setTimeout(() => {
-            setPlayers(prev => prev.map(p => {
+            const nextPlayers = currentPlayers.map(p => {
               if (p.id === ai.id) {
                 const nextHand = [...p.hand];
                 nextHand.splice(nextHand.indexOf(chosenCombo[0]), 1);
@@ -878,40 +1310,52 @@ export default function App() {
                 };
               }
               return p;
-            }));
-            addLog(`🌪️ 【灵风】消耗1币发动《乘风》！跨座位吃了【${tile}】，轮次直接跳转至灵风！`);
+            });
+            const nextLogs = [...currentLogs, `🌪️ 【灵风】消耗1币发动《乘风》！跨座位吃了【${tile}】，轮次直接跳转至灵风！`];
+            setPlayers(nextPlayers);
+            setLogs(nextLogs);
             setTurn(ai.id);
             setGamePhase('ACTION');
+            if (gameMode === 'ONLINE') {
+              pushRoomState({ players: nextPlayers, turn: ai.id, gamePhase: 'ACTION', logs: nextLogs, pendingReactions: null });
+            }
           }, 650);
           return;
         }
       }
     }
 
-    // 无人打断，检查老千是否触发《步步生花》额外回合，或正常推进到下一家
-    checkLaoqianExtraTurnOrAdvance(currentPlayers, discarderId);
+    checkLaoqianExtraTurnOrAdvance(currentPlayers, discarderId, currentLogs);
   };
 
   // --- 人类玩家响应面板操作 ---
   const handleHumanPassReaction = () => {
+    if (!pendingReactions) return;
     const record = pendingReactions.discardRecord;
     setPendingReactions(null);
-    processAIReactions(players, record);
+    processAIReactions(players, record, logs);
   };
 
   const handleHumanHuReaction = () => {
+    const responderId = pendingReactions.responderId ?? mySeatId;
     const { discardRecord, huType } = pendingReactions;
+    const winObj = { winner: players[responderId], winType: `点炮胡 (${huType})`, winningTile: discardRecord.tile };
+    const nextLogs = [...logs, `🎉 恭喜！[${players[responderId].role}] 胡了 [${discardRecord.role}] 打出的【${discardRecord.tile}】(${huType})！`];
     setPendingReactions(null);
-    setWinnerInfo({ winner: players[0], winType: `点炮胡 (${huType})`, winningTile: discardRecord.tile });
+    setWinnerInfo(winObj);
     setGamePhase('WINNER');
-    addLog(`🎉 恭喜！你胡了 [${discardRecord.role}] 打出的【${discardRecord.tile}】(${huType})！`);
+    setLogs(nextLogs);
+    if (gameMode === 'ONLINE') {
+      pushRoomState({ winnerInfo: winObj, gamePhase: 'WINNER', logs: nextLogs, pendingReactions: null });
+    }
   };
 
   const handleHumanNormalPeng = () => {
+    const responderId = pendingReactions.responderId ?? mySeatId;
     const { tile } = pendingReactions.discardRecord;
     setPendingReactions(null);
-    setPlayers(prev => prev.map(p => {
-      if (p.id === 0) {
+    const updatedPlayers = players.map(p => {
+      if (p.id === responderId) {
         const nextHand = [...p.hand];
         nextHand.splice(nextHand.indexOf(tile), 1);
         nextHand.splice(nextHand.indexOf(tile), 1);
@@ -922,21 +1366,27 @@ export default function App() {
         };
       }
       return p;
-    }));
-    addLog(`💥 你碰了【${tile}】！请打出一张牌。`);
-    setTurn(0);
+    });
+    const nextLogs = [...logs, `💥 [${players[responderId].role}] 碰了【${tile}】！请打出一张牌。`];
+    setPlayers(updatedPlayers);
+    setLogs(nextLogs);
+    setTurn(responderId);
     setGamePhase('ACTION');
+    if (gameMode === 'ONLINE') {
+      pushRoomState({ players: updatedPlayers, turn: responderId, gamePhase: 'ACTION', logs: nextLogs, pendingReactions: null });
+    }
   };
 
   const handleHumanMingGang = () => {
+    const responderId = pendingReactions.responderId ?? mySeatId;
     const { tile } = pendingReactions.discardRecord;
     setPendingReactions(null);
-    const humanRole = players[0]?.role;
+    const humanRole = players[responderId]?.role;
     const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(deck, 1, humanRole);
     setDeck(remainingDeck);
 
-    setPlayers(prev => prev.map(p => {
-      if (p.id === 0) {
+    const updatedPlayers = players.map(p => {
+      if (p.id === responderId) {
         const nextHand = [...p.hand];
         for (let i = 0; i < 3; i++) nextHand.splice(nextHand.indexOf(tile), 1);
         return {
@@ -947,10 +1397,15 @@ export default function App() {
         };
       }
       return p;
-    }));
-    addLog(`⚡ 你明杠了【${tile}】（算作1张花牌），并补摸了1张牌！`);
-    setTurn(0);
+    });
+    const nextLogs = [...logs, `⚡ [${players[responderId].role}] 明杠了【${tile}】（算作1张花牌），并补摸了1张牌！`];
+    setPlayers(updatedPlayers);
+    setLogs(nextLogs);
+    setTurn(responderId);
     setGamePhase('ACTION');
+    if (gameMode === 'ONLINE') {
+      pushRoomState({ deck: remainingDeck, players: updatedPlayers, turn: responderId, gamePhase: 'ACTION', logs: nextLogs, pendingReactions: null });
+    }
   };
 
   const handleOpenMaijiSkillModal = () => {
@@ -958,15 +1413,16 @@ export default function App() {
   };
 
   const handleConfirmMaijiPeng = (wasteCardIdx) => {
+    const responderId = pendingReactions.responderId ?? mySeatId;
     const { tile } = pendingReactions.discardRecord;
-    const human = players[0];
+    const human = players[responderId];
     const wasteTile = human.hand[wasteCardIdx];
 
     setMaijiModal(false);
     setPendingReactions(null);
 
-    setPlayers(prev => prev.map(p => {
-      if (p.id === 0) {
+    const updatedPlayers = players.map(p => {
+      if (p.id === responderId) {
         const nextHand = [...p.hand];
         nextHand.splice(wasteCardIdx, 1);
         const targetIdx = nextHand.indexOf(tile);
@@ -982,11 +1438,16 @@ export default function App() {
         };
       }
       return p;
-    }));
+    });
 
-    addLog(`🔧 你消耗1币发动《刻意求工》，用废牌【${wasteTile}】强行碰出【${tile}】！现在请打出一张牌。`);
-    setTurn(0);
+    const nextLogs = [...logs, `🔧 [${human.role}] 消耗1币发动《刻意求工》，用废牌【${wasteTile}】强行碰出【${tile}】！`];
+    setPlayers(updatedPlayers);
+    setLogs(nextLogs);
+    setTurn(responderId);
     setGamePhase('ACTION');
+    if (gameMode === 'ONLINE') {
+      pushRoomState({ players: updatedPlayers, turn: responderId, gamePhase: 'ACTION', logs: nextLogs, pendingReactions: null });
+    }
   };
 
   const handleTriggerChi = (isSkill) => {
@@ -999,11 +1460,12 @@ export default function App() {
   };
 
   const executeHumanChi = (combo, targetTile, isSkill) => {
+    const responderId = pendingReactions?.responderId ?? mySeatId;
     setLingfengCombos(null);
     setPendingReactions(null);
 
-    setPlayers(prev => prev.map(p => {
-      if (p.id === 0) {
+    const updatedPlayers = players.map(p => {
+      if (p.id === responderId) {
         const nextHand = [...p.hand];
         nextHand.splice(nextHand.indexOf(combo[0]), 1);
         nextHand.splice(nextHand.indexOf(combo[1]), 1);
@@ -1016,22 +1478,29 @@ export default function App() {
         };
       }
       return p;
-    }));
+    });
 
-    if (isSkill) {
-      addLog(`🌪️ 你消耗1币发动《乘风》！跨座位吃入【${targetTile}】，轮次跳转至你的回合！`);
-    } else {
-      addLog(`🍽️ 你吃了上家的【${targetTile}】！请打出一张牌。`);
-    }
-    setTurn(0);
+    const nextLogs = [
+      ...logs,
+      isSkill
+        ? `🌪️ [${players[responderId].role}] 消耗1币发动《乘风》！跨座位吃入【${targetTile}】，轮次跳转！`
+        : `🍽️ [${players[responderId].role}] 吃了上家的【${targetTile}】！请打出一张牌。`
+    ];
+    setPlayers(updatedPlayers);
+    setLogs(nextLogs);
+    setTurn(responderId);
     setGamePhase('ACTION');
+    if (gameMode === 'ONLINE') {
+      pushRoomState({ players: updatedPlayers, turn: responderId, gamePhase: 'ACTION', logs: nextLogs, pendingReactions: null });
+    }
   };
 
   // --- 回合内主动技能：老千、典当师、阿姨 ---
 
-  // 1. 老千《千术》 (摸牌阶段使用)
+  // 1. 老千《千术》
   const handleOpenQianshu = () => {
-    if (turn !== 0 || gamePhase !== 'DRAW' || players[0].coins < 1 || deck.length < 3) return;
+    const me = players[mySeatId];
+    if (turn !== mySeatId || gamePhase !== 'DRAW' || !me || me.coins < 1 || deck.length < 3) return;
     const top3 = deck.slice(0, 3);
     setQianshuData({
       cards: top3,
@@ -1058,10 +1527,11 @@ export default function App() {
 
     let finalHandAdd = [];
     let finalFlowerAdd = [];
+    const myRole = players[mySeatId]?.role;
 
-    if (isFlowerTile(pickedCard, players[0].role)) {
+    if (isFlowerTile(pickedCard, myRole)) {
       finalFlowerAdd.push(pickedCard);
-      const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(restDeck, 1, players[0].role);
+      const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(restDeck, 1, myRole);
       finalHandAdd = drawnHand;
       finalFlowerAdd.push(...drawnFlowers);
       restDeck = remainingDeck;
@@ -1069,9 +1539,8 @@ export default function App() {
       finalHandAdd = [pickedCard];
     }
 
-    setDeck(restDeck);
-    setPlayers(prev => prev.map(p => {
-      if (p.id === 0) {
+    const updatedPlayers = players.map(p => {
+      if (p.id === mySeatId) {
         return {
           ...p,
           coins: p.coins - 1,
@@ -1080,65 +1549,88 @@ export default function App() {
         };
       }
       return p;
-    }));
+    });
 
-    addLog(`👁️ 【老千】消耗1币发动《千术》！挑走1张牌，并将剩余2张按序放回${putPosition === 'top' ? '牌山顶' : '牌山底'}！`);
+    const nextLogs = [...logs, `👁️ 【老千】消耗1币发动《千术》！挑走1张牌，并将剩余2张按序放回${putPosition === 'top' ? '牌山顶' : '牌山底'}！`];
+    setDeck(restDeck);
+    setPlayers(updatedPlayers);
+    setLogs(nextLogs);
     setQianshuData(null);
     setGamePhase('ACTION');
+    if (gameMode === 'ONLINE') {
+      pushRoomState({ deck: restDeck, players: updatedPlayers, gamePhase: 'ACTION', logs: nextLogs });
+    }
   };
 
   // 2. 典当师《售罄》
   const handleConfirmPawnBan = (suit) => {
     setPawnModal(false);
-    setPlayers(prev => prev.map(p => p.id === 0 ? { ...p, coins: p.coins - 1 } : p));
-    setBannedSuitInfo({ suit, ownerId: 0 });
-    addLog(`🚫 【典当师】消耗1币发动《售罄》！下回合开始前，全场禁止打出/胡/副露亮出「${suit}」花色！`);
+    const updatedPlayers = players.map(p => p.id === mySeatId ? { ...p, coins: p.coins - 1 } : p);
+    const banObj = { suit, ownerId: mySeatId };
+    const nextLogs = [...logs, `🚫 【典当师】消耗1币发动《售罄》！下回合开始前，全场禁止打出/胡/副露亮出「${suit}」花色！`];
+    setPlayers(updatedPlayers);
+    setBannedSuitInfo(banObj);
+    setLogs(nextLogs);
+    if (gameMode === 'ONLINE') {
+      pushRoomState({ players: updatedPlayers, bannedSuitInfo: banObj, logs: nextLogs });
+    }
   };
 
-  // 3. 阿姨主动技能 1：《闲人免进》（1币，指定下家1巡禁止任何行动）
+  // 3. 阿姨主动技能 1：《闲人免进》
   const handleAyiFreezeNext = () => {
-    const human = players[0];
-    if (turn !== 0 || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || human.role !== '阿姨' || human.coins < 1) return;
-    const nextId = getNextPlayerId(0, turnDirection);
+    const human = players[mySeatId];
+    if (turn !== mySeatId || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || human.role !== '阿姨' || human.coins < 1) return;
+    const nextId = getNextPlayerId(mySeatId, turnDirection);
     const nextPlayer = players[nextId];
     if (!nextPlayer || nextPlayer.isFrozen) return;
 
-    setPlayers(prev => prev.map(p => {
-      if (p.id === 0) return { ...p, coins: p.coins - 1 };
+    const updatedPlayers = players.map(p => {
+      if (p.id === mySeatId) return { ...p, coins: p.coins - 1 };
       if (p.id === nextId) return { ...p, isFrozen: true };
       return p;
-    }));
-    addLog(`⛔ 【阿姨】消耗1币发动《闲人免进》！指定当前下家 [${nextPlayer.role}](${nextPlayer.name}) 1巡禁止任何行动（禁响应吃碰胡、下回合直接跳过）！`);
+    });
+    const nextLogs = [...logs, `⛔ 【阿姨】消耗1币发动《闲人免进》！指定当前下家 [${nextPlayer.role}](${nextPlayer.name}) 1巡禁止任何行动！`];
+    setPlayers(updatedPlayers);
+    setLogs(nextLogs);
+    if (gameMode === 'ONLINE') {
+      pushRoomState({ players: updatedPlayers, logs: nextLogs });
+    }
   };
 
-  // 4. 阿姨主动技能 2：《风水轮流转》（1币，转换本局游戏的出牌顺序：顺时针 ⇄ 逆时针）
+  // 4. 阿姨主动技能 2：《风水轮流转》
   const handleAyiReverseDirection = () => {
-    const human = players[0];
-    if (turn !== 0 || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || human.role !== '阿姨' || human.coins < 1) return;
+    const human = players[mySeatId];
+    if (turn !== mySeatId || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || human.role !== '阿姨' || human.coins < 1) return;
     const newDir = turnDirection * -1;
-    setTurnDirection(newDir);
-    setPlayers(prev => prev.map(p => p.id === 0 ? { ...p, coins: p.coins - 1 } : p));
+    const updatedPlayers = players.map(p => p.id === mySeatId ? { ...p, coins: p.coins - 1 } : p);
+    const newNextPlayer = players[getNextPlayerId(mySeatId, newDir)];
+    const nextLogs = [...logs, `🔄 【阿姨】消耗1币发动《风水轮流转》！全场出牌顺序已转换为【${newDir === 1 ? '逆时针' : '顺时针'}】，当前下家变为 [${newNextPlayer.role}](${newNextPlayer.name})！`];
 
-    const newNextPlayer = players[getNextPlayerId(0, newDir)];
-    addLog(`🔄 【阿姨】消耗1币发动《风水轮流转》！全场出牌顺序已转换为【${newDir === 1 ? '逆时针' : '顺时针'}】，当前下家变为 [${newNextPlayer.role}](${newNextPlayer.name})！`);
+    setTurnDirection(newDir);
+    setPlayers(updatedPlayers);
+    setLogs(nextLogs);
+    if (gameMode === 'ONLINE') {
+      pushRoomState({ turnDirection: newDir, players: updatedPlayers, logs: nextLogs });
+    }
   };
 
   // 5. 自己回合暗杠或明杠
   const getHumanSelfGangOptions = () => {
-    if (turn !== 0 || gamePhase !== 'ACTION') return [];
-    const human = players[0];
+    if (turn !== mySeatId || gamePhase !== 'ACTION') return [];
+    const human = players[mySeatId];
+    if (!human) return [];
     const counts = {};
     human.hand.forEach(t => counts[t] = (counts[t] || 0) + 1);
     return Object.keys(counts).filter(t => counts[t] === 4);
   };
 
   const handleHumanAnGang = (tile, isMingChoice = false) => {
-    const humanRole = players[0]?.role;
+    const humanRole = players[mySeatId]?.role;
     const { drawnHand, drawnFlowers, remainingDeck } = drawAndResolveFlowers(deck, 1, humanRole);
     setDeck(remainingDeck);
 
-    setPlayers(prev => prev.map(p => {
-      if (p.id === 0) {
+    const updatedPlayers = players.map(p => {
+      if (p.id === mySeatId) {
         const nextHand = p.hand.filter(t => t !== tile);
         return {
           ...p,
@@ -1148,20 +1640,31 @@ export default function App() {
         };
       }
       return p;
-    }));
-    addLog(`🀄 你选择了${isMingChoice ? '【明杠】(算1张花牌)' : '【暗杠】(不算花牌)'}【${tile}】，并补摸1张牌！`);
+    });
+    const nextLogs = [...logs, `🀄 [${players[mySeatId].role}] 选择了${isMingChoice ? '【明杠】(算1张花牌)' : '【暗杠】(不算花牌)'}【${tile}】，并补摸1张牌！`];
+    setPlayers(updatedPlayers);
+    setLogs(nextLogs);
+    if (gameMode === 'ONLINE') {
+      pushRoomState({ deck: remainingDeck, players: updatedPlayers, logs: nextLogs });
+    }
   };
 
   // 6. 自摸胡牌
   const handleHumanTsumo = () => {
-    const res = checkCanHu(players[0], null, bannedSuitInfo);
+    const me = players[mySeatId];
+    const res = checkCanHu(me, null, bannedSuitInfo);
     if (!res.canHu) return;
-    setWinnerInfo({ winner: players[0], winType: `自摸 (${res.type})`, winningTile: players[0].hand[players[0].hand.length - 1] });
+    const winObj = { winner: me, winType: `自摸 (${res.type})`, winningTile: me.hand[me.hand.length - 1] };
+    const nextLogs = [...logs, `🎉 恭喜！[${me.role}] 自摸胡牌 (${res.type})！`];
+    setWinnerInfo(winObj);
     setGamePhase('WINNER');
-    addLog(`🎉 恭喜！你自摸胡牌 (${res.type})！`);
+    setLogs(nextLogs);
+    if (gameMode === 'ONLINE') {
+      pushRoomState({ winnerInfo: winObj, gamePhase: 'WINNER', logs: nextLogs });
+    }
   };
 
-  // --- 智能 AI 出牌评分器（含阿姨记牌器加成） ---
+  // --- 智能 AI 出牌评分器（含灵风保留风牌加成） ---
   const selectAIDiscardIndex = (aiPlayer) => {
     const validIndices = [];
     aiPlayer.hand.forEach((t, idx) => {
@@ -1176,7 +1679,6 @@ export default function App() {
     const counts = {};
     aiPlayer.hand.forEach(t => counts[t] = (counts[t] || 0) + 1);
 
-    // 阿姨拥有《神机妙算》记牌器，AI 阿姨能识别死张（剩余数量为0的孤张优先打出）
     const remainingMap = aiPlayer.role === '阿姨' ? computeRemainingTileCounts(players, aiPlayer.id) : null;
 
     let lowestScore = Infinity;
@@ -1190,8 +1692,13 @@ export default function App() {
       if (counts[tile] >= 3) keepScore += 90;
       if (aiPlayer.role === '典当师' && counts[tile] >= 3) keepScore += 50;
 
+      // 灵风拥有风牌即算 0.5 花（即使打出到弃牌河也算 0.5 花，但凑对子碰出不仅算副露还能凑面子）
+      if (aiPlayer.role === '灵风' && tile.endsWith('风') && counts[tile] >= 2) {
+        keepScore += 25;
+      }
+
       if (remainingMap && counts[tile] === 1 && remainingMap[tile] === 0) {
-        keepScore -= 25; // 外面已经绝张的单张优先打掉
+        keepScore -= 25;
       }
 
       const suit = getTileSuit(tile);
@@ -1217,15 +1724,20 @@ export default function App() {
     return bestDiscardIdx;
   };
 
-  // --- AI 回合驱动逻辑 ---
+  // --- AI 回合驱动逻辑（在联机模式下由房主或当前客户端驱动 AI 座位） ---
   useEffect(() => {
-    if (turn === 0 || gamePhase === 'WINNER' || gamePhase === 'DRAW_GAME' || gamePhase === 'ROLE_SELECT') return;
+    if (gamePhase === 'WINNER' || gamePhase === 'DRAW_GAME' || gamePhase === 'ROLE_SELECT' || showRoleSelectModal) return;
 
-    const ai = players[turn];
-    if (!ai) return;
+    const currentActor = players[turn];
+    if (!currentActor || !currentActor.isAI) return;
 
-    // 防御式检查：如果当前轮到的 AI 被阿姨冻结，立即解冻并跳过
-    if (ai.isFrozen) {
+    // 联机模式下，仅由 0 号位（或最小座位号的真人玩家）统一驱动 AI 防止重复触发
+    if (gameMode === 'ONLINE') {
+      const firstHumanSeat = players.find(p => !p.isAI)?.id ?? 0;
+      if (mySeatId !== firstHumanSeat) return;
+    }
+
+    if (currentActor.isFrozen) {
       const skipTimer = setTimeout(() => {
         advanceTurn(turn, players);
       }, 450);
@@ -1236,10 +1748,9 @@ export default function App() {
 
     if (gamePhase === 'DRAW') {
       const timer = setTimeout(() => {
-        // 老千 AI 在摸牌阶段发动《千术》看3拿1
-        if (ai.role === '老千' && ai.coins >= 1 && deck.length >= 3 && Math.random() < skillTriggerProb) {
+        if (currentActor.role === '老千' && currentActor.coins >= 1 && deck.length >= 3 && Math.random() < skillTriggerProb) {
           const top3 = deck.slice(0, 3);
-          let pickIdx = top3.findIndex(t => isFlowerTile(t, ai.role) || ai.hand.includes(t));
+          let pickIdx = top3.findIndex(t => isFlowerTile(t, currentActor.role) || currentActor.hand.includes(t));
           if (pickIdx === -1) pickIdx = 0;
           const picked = top3[pickIdx];
           const others = top3.filter((_, idx) => idx !== pickIdx);
@@ -1247,24 +1758,30 @@ export default function App() {
 
           let addH = [];
           let addF = [];
-          if (isFlowerTile(picked, ai.role)) {
+          let finalDeck = rest;
+          if (isFlowerTile(picked, currentActor.role)) {
             addF.push(picked);
-            const res = drawAndResolveFlowers(rest, 1, ai.role);
+            const res = drawAndResolveFlowers(rest, 1, currentActor.role);
             addH = res.drawnHand;
             addF.push(...res.drawnFlowers);
-            setDeck(res.remainingDeck);
+            finalDeck = res.remainingDeck;
           } else {
             addH = [picked];
-            setDeck(rest);
           }
-          setPlayers(prev => prev.map(p => p.id === ai.id ? {
+          const updatedPlayers = players.map(p => p.id === currentActor.id ? {
             ...p,
             coins: p.coins - 1,
             hand: [...p.hand, ...addH],
             flowerTiles: [...p.flowerTiles, ...addF]
-          } : p));
-          addLog(`👁️ [${ai.role}] 消耗1币发动《千术》，从牌山顶挑选了1张牌并将余牌沉底！`);
+          } : p);
+          const nextLogs = [...logs, `👁️ [${currentActor.role}] 消耗1币发动《千术》，从牌山顶挑选了1张牌并将余牌沉底！`];
+          setDeck(finalDeck);
+          setPlayers(updatedPlayers);
+          setLogs(nextLogs);
           setGamePhase('ACTION');
+          if (gameMode === 'ONLINE') {
+            pushRoomState({ deck: finalDeck, players: updatedPlayers, gamePhase: 'ACTION', logs: nextLogs });
+          }
         } else {
           handleDrawTile(turn);
         }
@@ -1275,16 +1792,19 @@ export default function App() {
     if (gamePhase === 'ACTION') {
       const timer = setTimeout(() => {
         const currentAI = players[turn];
-        // 1. 检查 AI 是否自摸
         const huRes = checkCanHu(currentAI, null, bannedSuitInfo);
         if (huRes.canHu) {
-          setWinnerInfo({ winner: currentAI, winType: `自摸 (${huRes.type})`, winningTile: currentAI.hand[currentAI.hand.length - 1] });
+          const winObj = { winner: currentAI, winType: `自摸 (${huRes.type})`, winningTile: currentAI.hand[currentAI.hand.length - 1] };
+          const nextLogs = [...logs, `🏆 [${currentAI.role}] 自摸胡牌 (${huRes.type})！`];
+          setWinnerInfo(winObj);
           setGamePhase('WINNER');
-          addLog(`🏆 [${currentAI.role}] 自摸胡牌 (${huRes.type})！`);
+          setLogs(nextLogs);
+          if (gameMode === 'ONLINE') {
+            pushRoomState({ winnerInfo: winObj, gamePhase: 'WINNER', logs: nextLogs });
+          }
           return;
         }
 
-        // 2. 典当师 AI 发动《售罄》
         const { total: currentAIFlw } = getFlowerBreakdown(currentAI);
         const aiHasPeng = currentAI.melds.some(m => m.type === 'peng');
         const safeToSpendCoin = !aiHasPeng || (currentAIFlw - 1 >= 4);
@@ -1301,7 +1821,6 @@ export default function App() {
           addLog(`🚫 【典当师】消耗1币发动《售罄》！全场禁止打出/胡/副露亮出「${leastSuit}」花色！`);
         }
 
-        // 3. 阿姨 AI 发动《闲人免进》或《风水轮流转》
         if (currentAI.role === '阿姨' && currentAI.coins >= 1 && Math.random() < skillTriggerProb * 0.65) {
           const nextId = getNextPlayerId(currentAI.id, turnDirection);
           const nextPlayerObj = players[nextId];
@@ -1320,14 +1839,13 @@ export default function App() {
           }
         }
 
-        // 4. 选择最合理的牌打出
         const chosenIdx = selectAIDiscardIndex(currentAI);
         executeDiscard(turn, chosenIdx);
       }, 850);
       return () => clearTimeout(timer);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turn, gamePhase, players, deck.length, turnDirection]);
+  }, [turn, gamePhase, players, deck.length, turnDirection, showRoleSelectModal]);
 
   // --- UI 渲染辅助函数 ---
   const getTileStyle = (tile) => {
@@ -1386,8 +1904,8 @@ export default function App() {
     const hasPeng = player.melds.some(m => m.type === 'peng');
     const isPengLocked = hasPeng && totalFlw < 4;
     const roleCfg = ROLES_INFO[player.role];
-    const isHumanNextTarget = getNextPlayerId(0, turnDirection) === player.id;
-    const isHumanUpperTarget = getUpperPlayerId(0, turnDirection) === player.id;
+    const isHumanNextTarget = getNextPlayerId(mySeatId, turnDirection) === player.id;
+    const isHumanUpperTarget = getUpperPlayerId(mySeatId, turnDirection) === player.id;
 
     return (
       <div className={`bg-neutral-900/85 border ${isActive ? 'border-yellow-400 ring-2 ring-yellow-400/50' : player.isFrozen ? 'border-rose-500 ring-2 ring-rose-500/50' : 'border-neutral-700'} px-3 py-2 rounded-xl shadow-lg backdrop-blur-md text-xs transition-all`}>
@@ -1395,12 +1913,12 @@ export default function App() {
           <span className={`font-black text-sm ${roleCfg.text} flex items-center`}>
             {player.role}
             <span className="text-[10px] text-gray-400 font-normal ml-1">({player.name})</span>
-            {player.id !== 0 && isHumanNextTarget && (
+            {player.id !== mySeatId && isHumanNextTarget && (
               <span className="ml-1.5 bg-cyan-950 border border-cyan-600 text-cyan-300 text-[9px] px-1 py-0.2 rounded">
                 当前下家
               </span>
             )}
-            {player.id !== 0 && isHumanUpperTarget && (
+            {player.id !== mySeatId && isHumanUpperTarget && (
               <span className="ml-1.5 bg-amber-950 border border-amber-600 text-amber-300 text-[9px] px-1 py-0.2 rounded">
                 当前上家
               </span>
@@ -1419,7 +1937,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* 状态标签栏 */}
         <div className="flex flex-wrap gap-1 items-center text-[10px] text-gray-400">
           <span>花牌区:{player.flowerTiles.length}</span>
           {player.melds.length > 0 && <span>| 副露:{player.melds.length}</span>}
@@ -1440,7 +1957,6 @@ export default function App() {
           )}
         </div>
 
-        {/* 展示副露 */}
         {player.melds.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mt-1.5 pt-1.5 border-t border-neutral-800">
             {player.melds.map((m, idx) => (
@@ -1461,15 +1977,20 @@ export default function App() {
     );
   };
 
-  const humanPlayer = players[0];
-  const humanFlowerInfo = humanPlayer ? getFlowerBreakdown(humanPlayer) : { total: 0, details: [] };
-  const humanHuCheck = humanPlayer && turn === 0 && gamePhase === 'ACTION'
-    ? checkCanHu(humanPlayer, null, bannedSuitInfo)
+  // 以本地玩家座位 (mySeatId) 为基准旋转桌面视角：下(自己)、右(下家)、上(对家)、左(上家)
+  const bottomPlayer = players[mySeatId];
+  const rightPlayer = players[(mySeatId + 1) % 4];
+  const topPlayer = players[(mySeatId + 2) % 4];
+  const leftPlayer = players[(mySeatId + 3) % 4];
+
+  const humanFlowerInfo = bottomPlayer ? getFlowerBreakdown(bottomPlayer) : { total: 0, details: [] };
+  const humanHuCheck = bottomPlayer && turn === mySeatId && gamePhase === 'ACTION'
+    ? checkCanHu(bottomPlayer, null, bannedSuitInfo)
     : { canHu: false, lockedReason: null };
   const humanGangOptions = getHumanSelfGangOptions();
-  const humanTingList = humanPlayer ? getTingTiles(humanPlayer, bannedSuitInfo) : [];
-  const cardCounterMap = humanPlayer?.role === '阿姨' ? computeRemainingTileCounts(players, 0) : null;
-  const currentNextPlayer = players[getNextPlayerId(0, turnDirection)];
+  const humanTingList = bottomPlayer ? getTingTiles(bottomPlayer, bannedSuitInfo) : [];
+  const cardCounterMap = bottomPlayer?.role === '阿姨' ? computeRemainingTileCounts(players, mySeatId) : null;
+  const currentNextPlayer = players[getNextPlayerId(mySeatId, turnDirection)];
 
   return (
     <div className="min-h-screen bg-neutral-950 flex flex-col lg:flex-row text-gray-100 font-sans select-none overflow-hidden">
@@ -1477,24 +1998,30 @@ export default function App() {
       {/* 左侧/中央 麻将牌桌主区域 */}
       <div className="flex-1 relative bg-gradient-to-br from-emerald-900 via-teal-900 to-emerald-950 flex flex-col justify-between p-3 md:p-5 shadow-[inset_0_0_120px_rgba(0,0,0,0.75)] border-b lg:border-b-0 lg:border-r border-amber-900/40">
         
-        {/* 顶部栏：场地状态 & 对家(AI-2) */}
+        {/* 顶部栏：场地状态 & 对家(Top) */}
         <div className="flex flex-col items-center space-y-2 z-10">
           <div className="w-full flex justify-between items-start">
-            {/* 左上角快捷重选角色与难度 + 出牌顺序方向指示 */}
+            {/* 左上角快捷重选角色与联机房间入口 */}
             <div className="flex flex-col space-y-1.5">
               <button
                 onClick={() => setShowRoleSelectModal(true)}
                 className="bg-neutral-900/85 hover:bg-neutral-800 border border-neutral-700 text-xs px-3 py-1.5 rounded-lg flex items-center text-gray-200 shadow"
               >
-                <Users size={14} className="mr-1.5 text-yellow-400" /> 角色 / AI难度设置
+                <Users size={14} className="mr-1.5 text-yellow-400" /> 模式 / 房间 / 角色设置
               </button>
-              <div className="text-[11px] bg-black/35 px-2.5 py-1 rounded border border-white/10 flex items-center space-x-2">
-                <span className="flex items-center">
-                  <Brain size={12} className="text-cyan-400 mr-1" />
-                  <span className={`font-bold ${AI_DIFFICULTIES[aiDifficulty].color}`}>
-                    {AI_DIFFICULTIES[aiDifficulty].name}
+              <div className="text-[11px] bg-black/35 px-2.5 py-1 rounded border border-white/10 flex flex-wrap items-center gap-2">
+                {gameMode === 'ONLINE' && activeRoomCode ? (
+                  <span className="flex items-center text-cyan-300 font-bold">
+                    <Globe size={12} className="mr-1 text-cyan-400" /> 房间 #{activeRoomCode} ({mySeatId + 1}号座)
                   </span>
-                </span>
+                ) : (
+                  <span className="flex items-center">
+                    <Brain size={12} className="text-cyan-400 mr-1" />
+                    <span className={`font-bold ${AI_DIFFICULTIES[aiDifficulty].color}`}>
+                      {AI_DIFFICULTIES[aiDifficulty].name}
+                    </span>
+                  </span>
+                )}
                 <span>|</span>
                 <span className="flex items-center text-amber-300 font-bold" title="当前出牌顺序（阿姨【风水轮流转】可反转）">
                   {turnDirection === 1 ? <RotateCcw size={12} className="mr-1" /> : <RotateCw size={12} className="mr-1" />}
@@ -1504,11 +2031,11 @@ export default function App() {
             </div>
 
             {/* 对家信息 */}
-            {players[2] && (
+            {topPlayer && (
               <div className="flex flex-col items-center">
-                {renderPlayerCard(players[2])}
+                {renderPlayerCard(topPlayer)}
                 <div className="flex space-x-1 mt-1.5">
-                  {players[2].hand.map((_, i) => (
+                  {topPlayer.hand.map((_, i) => (
                     <div key={i} className="w-5 h-7 bg-emerald-700 border-b-2 border-emerald-950 rounded-sm shadow" />
                   ))}
                 </div>
@@ -1531,7 +2058,7 @@ export default function App() {
                 </div>
               )}
 
-              {humanPlayer?.role === '阿姨' && (
+              {bottomPlayer?.role === '阿姨' && (
                 <button
                   onClick={() => setShowCardCounter(prev => !prev)}
                   className="bg-rose-950/90 hover:bg-rose-900 border border-rose-500 text-rose-200 text-xs px-2.5 py-1 rounded-lg flex items-center shadow-md font-bold"
@@ -1545,7 +2072,7 @@ export default function App() {
           </div>
 
           {/* 阿姨专属被动《神机妙算》实时记牌器面板 */}
-          {humanPlayer?.role === '阿姨' && showCardCounter && cardCounterMap && (
+          {bottomPlayer?.role === '阿姨' && showCardCounter && cardCounterMap && (
             <div className="w-full max-w-4xl bg-neutral-950/90 border border-rose-500/50 rounded-2xl p-2.5 shadow-2xl backdrop-blur-md text-[11px]">
               <div className="flex items-center justify-between mb-1.5 pb-1 border-b border-neutral-800">
                 <span className="font-black text-rose-400 flex items-center">
@@ -1618,31 +2145,53 @@ export default function App() {
           )}
         </div>
 
-        {/* 中部区域：左侧(AI-3) + 中央牌河与牌山信息 + 右侧(AI-1) */}
+        {/* 中部区域：左侧(Left) + 中央牌河与30秒倒计时 + 右侧(Right) */}
         <div className="w-full flex justify-between items-center my-2 flex-1">
           
-          {/* 左侧 (AI-3) */}
-          {players[3] && (
+          {/* 左侧玩家 */}
+          {leftPlayer && (
             <div className="flex items-center space-x-2">
               <div className="flex flex-col space-y-1">
-                {players[3].hand.slice(0, 10).map((_, i) => (
+                {leftPlayer.hand.slice(0, 10).map((_, i) => (
                   <div key={i} className="w-7 h-4 bg-emerald-700 border-r-2 border-emerald-950 rounded-sm shadow" />
                 ))}
               </div>
-              {renderPlayerCard(players[3])}
+              {renderPlayerCard(leftPlayer)}
             </div>
           )}
 
-          {/* 中央牌池与公牌信息 */}
-          <div className="flex-1 max-w-xl mx-4 bg-black/25 border-2 border-emerald-800/60 rounded-3xl p-4 flex flex-col items-center justify-between min-h-[210px] backdrop-blur-sm shadow-2xl">
-            <div className="flex flex-wrap items-center justify-center gap-3 text-xs md:text-sm text-emerald-200 font-bold">
+          {/* 中央牌池与公牌信息 (含30秒出牌倒计时器) */}
+          <div className="flex-1 max-w-xl mx-4 bg-black/25 border-2 border-emerald-800/60 rounded-3xl p-4 flex flex-col items-center justify-between min-h-[215px] backdrop-blur-sm shadow-2xl">
+            <div className="flex flex-wrap items-center justify-center gap-2.5 text-xs md:text-sm text-emerald-200 font-bold">
               <span>剩余牌山: <strong className="text-yellow-400 text-base">{deck.length}</strong> 张</span>
               <span>|</span>
               <span>当前轮次: <strong className="text-white">{players[turn]?.role}</strong></span>
               <span>|</span>
-              <span className="text-amber-300 flex items-center">
-                顺序: {turnDirection === 1 ? '逆时针 ↺' : '顺时针 ↻'}
-              </span>
+              {/* 30秒限时倒计时徽章 + 暂停/开启按钮 */}
+              <div className="flex items-center space-x-1">
+                <span
+                  className={`px-2.5 py-0.5 rounded-full font-black border flex items-center transition-all ${
+                    !timerEnabled
+                      ? 'bg-neutral-800 text-gray-400 border-neutral-600'
+                      : timeLeft <= 5
+                      ? 'bg-red-600 text-white border-red-300 animate-bounce shadow-lg'
+                      : timeLeft <= 10
+                      ? 'bg-amber-600/90 text-yellow-100 border-amber-300 animate-pulse'
+                      : 'bg-emerald-950/90 text-emerald-300 border-emerald-500/60'
+                  }`}
+                  title="每步限时30秒，超时自动摸牌/打牌/跳过"
+                >
+                  <Timer size={13} className="mr-1" />
+                  {timerEnabled ? `${timeLeft}s` : '已暂停'}
+                </span>
+                <button
+                  onClick={() => setTimerEnabled(prev => !prev)}
+                  className="p-1 rounded-full bg-neutral-800/80 hover:bg-neutral-700 text-gray-300 border border-neutral-600"
+                  title={timerEnabled ? '暂停30秒倒计时' : '恢复30秒倒计时'}
+                >
+                  {timerEnabled ? <Pause size={11} /> : <Play size={11} />}
+                </button>
+              </div>
             </div>
 
             {/* 最新打出的一张牌高亮 */}
@@ -1680,12 +2229,12 @@ export default function App() {
             </div>
           </div>
 
-          {/* 右侧 (AI-1) */}
-          {players[1] && (
+          {/* 右侧玩家 */}
+          {rightPlayer && (
             <div className="flex items-center space-x-2">
-              {renderPlayerCard(players[1])}
+              {renderPlayerCard(rightPlayer)}
               <div className="flex flex-col space-y-1">
-                {players[1].hand.slice(0, 10).map((_, i) => (
+                {rightPlayer.hand.slice(0, 10).map((_, i) => (
                   <div key={i} className="w-7 h-4 bg-emerald-700 border-l-2 border-emerald-950 rounded-sm shadow" />
                 ))}
               </div>
@@ -1693,30 +2242,30 @@ export default function App() {
           )}
         </div>
 
-        {/* 底部人类玩家操作台与手牌 */}
-        {humanPlayer && (
+        {/* 底部本机玩家操作台与手牌 */}
+        {bottomPlayer && (
           <div className="flex flex-col items-center w-full max-w-5xl mx-auto space-y-2.5 z-10">
             
             {/* 老千打牌后无人中断时，弹出《步步生花》额外抽牌打牌确认栏 */}
-            {gamePhase === 'LAOQIAN_EXTRA_PROMPT' && (
+            {gamePhase === 'LAOQIAN_EXTRA_PROMPT' && turn === mySeatId && (
               <div className="w-full bg-pink-950/95 border-2 border-pink-400 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2 shadow-2xl animate-pulse">
                 <div className="flex items-center space-x-2">
                   <Flower className="text-pink-400" size={20} />
                   <div className="text-xs md:text-sm text-white">
-                    <span className="font-black text-pink-300">【老千 · 步步生花】已就绪！</span>
+                    <span className="font-black text-pink-300">【老千 · 步步生花】已就绪！({timeLeft}s)</span>
                     <span className="ml-1">你当前拥有 <strong>{humanFlowerInfo.total} 花</strong>（大于4花），是否消耗 1 张花牌换取<strong>额外的抽牌打牌机会</strong>？</span>
                   </div>
                 </div>
                 <div className="flex space-x-2">
                   <button
-                    onClick={() => executeLaoqianExtraTurn(0, players)}
+                    onClick={() => executeLaoqianExtraTurn(mySeatId, players)}
                     className="bg-pink-600 hover:bg-pink-500 text-white font-black px-4 py-1.5 rounded-lg shadow-lg text-xs md:text-sm"
                   >
                     🌺 消耗1花：额外摸牌并继续打牌
                   </button>
                   <button
                     onClick={() => {
-                      const nextId = getNextPlayerId(0, turnDirection);
+                      const nextId = getNextPlayerId(mySeatId, turnDirection);
                       advanceTurn(nextId, players);
                     }}
                     className="bg-neutral-700 hover:bg-neutral-600 text-gray-200 font-bold px-4 py-1.5 rounded-lg text-xs md:text-sm"
@@ -1728,13 +2277,13 @@ export default function App() {
             )}
 
             {/* 当别人打牌时：吃 / 碰 / 杠 / 胡 / 技能响应浮层 */}
-            {gamePhase === 'REACTION' && pendingReactions && (
+            {gamePhase === 'REACTION' && pendingReactions && (pendingReactions.responderId === undefined || pendingReactions.responderId === mySeatId) && (
               <div className="w-full bg-amber-950/95 border-2 border-yellow-400 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2 shadow-2xl">
                 <div className="flex flex-col">
                   <div className="flex items-center space-x-2">
                     <Sparkles className="text-yellow-400" size={18} />
                     <span className="text-sm font-bold text-white">
-                      [{pendingReactions.discardRecord.role}] 打出了 <strong className="text-yellow-300 text-base">【{pendingReactions.discardRecord.tile}】</strong>，请选择响应：
+                      [{pendingReactions.discardRecord.role}] 打出了 <strong className="text-yellow-300 text-base">【{pendingReactions.discardRecord.tile}】</strong>，请在 <strong className="text-amber-300">{timeLeft}s</strong> 内选择响应：
                     </span>
                   </div>
                   {pendingReactions.huLockedReason && (
@@ -1776,14 +2325,14 @@ export default function App() {
                     </button>
                   )}
                   <button onClick={handleHumanPassReaction} className="bg-neutral-700 hover:bg-neutral-600 text-gray-200 font-bold px-4 py-1.5 rounded-lg">
-                    过
+                    过 ({timeLeft}s)
                   </button>
                 </div>
               </div>
             )}
 
             {/* 自摸被锁死时的醒目提示条 */}
-            {turn === 0 && gamePhase === 'ACTION' && !humanHuCheck.canHu && humanHuCheck.lockedReason && (
+            {turn === mySeatId && gamePhase === 'ACTION' && !humanHuCheck.canHu && humanHuCheck.lockedReason && (
               <div className="w-full bg-red-950/90 border border-red-500 px-3 py-1.5 rounded-xl flex items-center justify-center text-xs text-red-200 shadow">
                 <AlertCircle size={15} className="mr-1.5 text-red-400 shrink-0" />
                 <span><strong>牌型已胡但暂被锁死：</strong>{humanHuCheck.lockedReason}</span>
@@ -1824,15 +2373,15 @@ export default function App() {
 
             {/* 玩家状态与主动技能按钮栏 */}
             <div className="w-full flex flex-wrap justify-between items-end gap-2 px-2">
-              {renderPlayerCard(humanPlayer)}
+              {renderPlayerCard(bottomPlayer)}
 
               {/* 拔出的实体花牌展示（含灵风自动收入花牌区的北风） */}
               <div className="flex flex-wrap items-center gap-1 bg-black/35 px-3 py-1.5 rounded-xl border border-pink-500/20 max-w-md">
                 <span className="text-xs text-pink-300 mr-1 font-bold">花牌区 ({humanFlowerInfo.total}花):</span>
-                {humanPlayer.flowerTiles.length === 0 ? (
+                {bottomPlayer.flowerTiles.length === 0 ? (
                   <span className="text-xs text-gray-500">暂无实体花</span>
                 ) : (
-                  humanPlayer.flowerTiles.map((ft, idx) => (
+                  bottomPlayer.flowerTiles.map((ft, idx) => (
                     <span
                       key={idx}
                       className={`text-xs px-1.5 py-0.5 rounded font-bold border ${
@@ -1849,7 +2398,6 @@ export default function App() {
 
               {/* 角色专属技能与摸牌/理牌控制栏 */}
               <div className="flex flex-wrap items-center gap-2 bg-neutral-900/90 p-2 rounded-xl border border-neutral-700 shadow-xl">
-                {/* 理牌按钮 */}
                 <button
                   onClick={handleAutoSortHumanHand}
                   className="px-3 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-gray-200 text-xs font-bold flex items-center border border-neutral-600"
@@ -1858,12 +2406,11 @@ export default function App() {
                   <ArrowUpDown size={14} className="mr-1 text-blue-400" /> 自动理牌
                 </button>
 
-                {/* 普通摸牌 */}
                 <button
-                  onClick={() => handleDrawTile(0)}
-                  disabled={turn !== 0 || gamePhase !== 'DRAW'}
+                  onClick={() => handleDrawTile(mySeatId)}
+                  disabled={turn !== mySeatId || gamePhase !== 'DRAW'}
                   className={`px-4 py-2 rounded-lg font-bold text-xs md:text-sm flex items-center transition-all ${
-                    turn === 0 && gamePhase === 'DRAW'
+                    turn === mySeatId && gamePhase === 'DRAW'
                       ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg scale-105'
                       : 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
                   }`}
@@ -1872,13 +2419,13 @@ export default function App() {
                 </button>
 
                 {/* 老千专属：千术 + 步步生花额外回合预约 */}
-                {humanPlayer.role === '老千' && (
+                {bottomPlayer.role === '老千' && (
                   <>
                     <button
                       onClick={handleOpenQianshu}
-                      disabled={turn !== 0 || gamePhase !== 'DRAW' || humanPlayer.coins < 1 || deck.length < 3}
+                      disabled={turn !== mySeatId || gamePhase !== 'DRAW' || bottomPlayer.coins < 1 || deck.length < 3}
                       className={`px-3 py-2 rounded-lg font-bold text-xs md:text-sm flex items-center ${
-                        turn === 0 && gamePhase === 'DRAW' && humanPlayer.coins >= 1
+                        turn === mySeatId && gamePhase === 'DRAW' && bottomPlayer.coins >= 1
                           ? 'bg-amber-500 hover:bg-amber-400 text-black shadow-lg'
                           : 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
                       }`}
@@ -1887,9 +2434,9 @@ export default function App() {
                     </button>
                     <button
                       onClick={() => setLaoqianExtraQueued(prev => !prev)}
-                      disabled={turn !== 0 || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || humanFlowerInfo.total <= 4 || humanPlayer.flowerTiles.length === 0}
+                      disabled={turn !== mySeatId || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || humanFlowerInfo.total <= 4 || bottomPlayer.flowerTiles.length === 0}
                       className={`px-3 py-2 rounded-lg font-bold text-xs md:text-sm flex items-center transition-all ${
-                        turn === 0 && (gamePhase === 'DRAW' || gamePhase === 'ACTION') && humanFlowerInfo.total > 4 && humanPlayer.flowerTiles.length > 0
+                        turn === mySeatId && (gamePhase === 'DRAW' || gamePhase === 'ACTION') && humanFlowerInfo.total > 4 && bottomPlayer.flowerTiles.length > 0
                           ? laoqianExtraQueued
                             ? 'bg-pink-500 text-white ring-2 ring-yellow-300 shadow-lg'
                             : 'bg-pink-700 hover:bg-pink-600 text-white shadow-lg'
@@ -1904,12 +2451,12 @@ export default function App() {
                 )}
 
                 {/* 典当师专属：售罄 */}
-                {humanPlayer.role === '典当师' && (
+                {bottomPlayer.role === '典当师' && (
                   <button
                     onClick={() => setPawnModal(true)}
-                    disabled={turn !== 0 || gamePhase !== 'ACTION' || humanPlayer.coins < 1}
+                    disabled={turn !== mySeatId || gamePhase !== 'ACTION' || bottomPlayer.coins < 1}
                     className={`px-3 py-2 rounded-lg font-bold text-xs md:text-sm flex items-center ${
-                      turn === 0 && gamePhase === 'ACTION' && humanPlayer.coins >= 1
+                      turn === mySeatId && gamePhase === 'ACTION' && bottomPlayer.coins >= 1
                         ? 'bg-purple-600 hover:bg-purple-500 text-white shadow-lg'
                         : 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
                     }`}
@@ -1919,13 +2466,13 @@ export default function App() {
                 )}
 
                 {/* 阿姨专属：闲人免进 (1币) + 风水轮流转 (1币) */}
-                {humanPlayer.role === '阿姨' && (
+                {bottomPlayer.role === '阿姨' && (
                   <>
                     <button
                       onClick={handleAyiFreezeNext}
-                      disabled={turn !== 0 || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || humanPlayer.coins < 1 || currentNextPlayer?.isFrozen}
+                      disabled={turn !== mySeatId || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || bottomPlayer.coins < 1 || currentNextPlayer?.isFrozen}
                       className={`px-3 py-2 rounded-lg font-bold text-xs md:text-sm flex items-center ${
-                        turn === 0 && (gamePhase === 'DRAW' || gamePhase === 'ACTION') && humanPlayer.coins >= 1 && !currentNextPlayer?.isFrozen
+                        turn === mySeatId && (gamePhase === 'DRAW' || gamePhase === 'ACTION') && bottomPlayer.coins >= 1 && !currentNextPlayer?.isFrozen
                           ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-lg'
                           : 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
                       }`}
@@ -1936,9 +2483,9 @@ export default function App() {
                     </button>
                     <button
                       onClick={handleAyiReverseDirection}
-                      disabled={turn !== 0 || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || humanPlayer.coins < 1}
+                      disabled={turn !== mySeatId || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || bottomPlayer.coins < 1}
                       className={`px-3 py-2 rounded-lg font-bold text-xs md:text-sm flex items-center ${
-                        turn === 0 && (gamePhase === 'DRAW' || gamePhase === 'ACTION') && humanPlayer.coins >= 1
+                        turn === mySeatId && (gamePhase === 'DRAW' || gamePhase === 'ACTION') && bottomPlayer.coins >= 1
                           ? 'bg-orange-500 hover:bg-orange-400 text-black shadow-lg'
                           : 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
                       }`}
@@ -1980,19 +2527,21 @@ export default function App() {
               </div>
             </div>
 
-            {/* 人类手牌区 */}
+            {/* 本机玩家手牌区 */}
             <div className="bg-black/45 p-3 md:p-4 rounded-2xl w-full flex flex-col items-center border border-emerald-800/50 shadow-2xl">
               <div className="flex flex-wrap justify-center gap-1.5 md:gap-2">
-                {humanPlayer.hand.map((tile, i) => {
-                  const isAllowed = turn === 0 && gamePhase === 'ACTION' ? canPlayerDiscardTile(humanPlayer, tile) : true;
+                {bottomPlayer.hand.map((tile, i) => {
+                  const isAllowed = turn === mySeatId && gamePhase === 'ACTION' ? canPlayerDiscardTile(bottomPlayer, tile) : true;
+                  const isLingfengWind = bottomPlayer.role === '灵风' && (tile === '东风' || tile === '南风' || tile === '西风');
                   return (
                     <div key={i} className="relative group">
                       {renderMahjongTile(tile, {
                         onClick: () => handleHumanTileClick(i),
                         isSelected: selectedHandIdx === i,
-                        isDisabled: turn === 0 && gamePhase === 'ACTION' && !isAllowed
+                        isDisabled: turn === mySeatId && gamePhase === 'ACTION' && !isAllowed,
+                        badge: isLingfengWind ? '+0.5花' : null
                       })}
-                      {turn === 0 && gamePhase === 'ACTION' && isAllowed && (
+                      {turn === mySeatId && gamePhase === 'ACTION' && isAllowed && (
                         <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-red-600 text-white text-[10px] px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
                           {laoqianExtraQueued ? '打出并再摸1张' : '打出'}
                         </div>
@@ -2002,7 +2551,7 @@ export default function App() {
                 })}
               </div>
               <div className="text-[11px] text-emerald-200/70 mt-2 flex flex-wrap items-center justify-center gap-3">
-                <span>💡 提示：{turn === 0 && gamePhase === 'ACTION' ? '点击手牌即可打出' : '非出牌阶段点击两张手牌可自由交换位置（手动理牌）'}</span>
+                <span>💡 提示：{turn === mySeatId && gamePhase === 'ACTION' ? `请在 ${timeLeft}s 内点击手牌打出` : '非出牌阶段点击两张手牌可自由交换位置（手动理牌）'}</span>
                 <span>|</span>
                 <span>花数详情：{humanFlowerInfo.details.join('，')}</span>
               </div>
@@ -2016,9 +2565,9 @@ export default function App() {
         <div className="p-4 border-b border-neutral-800 bg-neutral-950 flex justify-between items-center">
           <div>
             <h1 className="text-lg font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-amber-500">
-              技能麻将 · 五大角色版
+              技能麻将 · 联机对战版
             </h1>
-            <p className="text-[11px] text-gray-400">新增「阿姨」· 步步生花额外回合</p>
+            <p className="text-[11px] text-gray-400">30s限时出牌 · 灵风全风牌加成</p>
           </div>
           <button
             onClick={() => startNewGame(selectedHumanRole, aiDifficulty)}
@@ -2035,21 +2584,21 @@ export default function App() {
             <Info size={14} className="mr-1.5 text-yellow-400" /> 核心规则速览
           </div>
           <ul className="list-disc pl-4 space-y-1 text-gray-400 text-[11px]">
-            <li><strong className="text-pink-400">花牌补牌：</strong>8花 + 中、发、白（灵风含北风）算花牌，抽到自动置入花牌区并补1张手牌。</li>
+            <li><strong className="text-pink-400">花牌补牌：</strong>8花 + 中、发、白（灵风含北风）算1花，抽到自动置入花牌区并补牌；灵风其余风牌各算0.5花。</li>
             <li><strong className="text-amber-400">4花解锁碰牌：</strong>每个玩家满4花时所“碰”的牌才生效；含“碰”牌型满4花前不能胡牌。</li>
-            <li><strong className="text-blue-400">杠牌规则：</strong>明杠算1张花牌，暗杠不算花牌。</li>
+            <li><strong className="text-emerald-400">30秒限时：</strong>每步摸牌、出牌或响应限时30秒，超时自动代打。</li>
           </ul>
 
-          {humanPlayer && (
-            <div className={`p-2.5 rounded-lg bg-neutral-800/90 border-l-4 ${ROLES_INFO[humanPlayer.role].border} mt-2`}>
-              <div className={`font-bold ${ROLES_INFO[humanPlayer.role].text}`}>
-                当前角色：{humanPlayer.role}
+          {bottomPlayer && (
+            <div className={`p-2.5 rounded-lg bg-neutral-800/90 border-l-4 ${ROLES_INFO[bottomPlayer.role].border} mt-2`}>
+              <div className={`font-bold ${ROLES_INFO[bottomPlayer.role].text}`}>
+                当前角色：{bottomPlayer.role}
               </div>
               <div className="text-[11px] text-gray-300 mt-1">
-                <strong>主动·{ROLES_INFO[humanPlayer.role].activeName}：</strong>{ROLES_INFO[humanPlayer.role].activeDesc}
+                <strong>主动·{ROLES_INFO[bottomPlayer.role].activeName}：</strong>{ROLES_INFO[bottomPlayer.role].activeDesc}
               </div>
               <div className="text-[11px] text-gray-400 mt-0.5">
-                <strong>被动·{ROLES_INFO[humanPlayer.role].passiveName}：</strong>{ROLES_INFO[humanPlayer.role].passiveDesc}
+                <strong>被动·{ROLES_INFO[bottomPlayer.role].passiveName}：</strong>{ROLES_INFO[bottomPlayer.role].passiveDesc}
               </div>
             </div>
           )}
@@ -2066,16 +2615,127 @@ export default function App() {
         </div>
       </div>
 
-      {/* ================== 弹窗 1：开局选择角色与 AI 难度 ================== */}
+      {/* ================== 弹窗 1：开局模式（单机 / 联机房间）、角色与 AI 难度 ================== */}
       {showRoleSelectModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4 overflow-y-auto">
           <div className="bg-neutral-900 border-2 border-yellow-600/60 rounded-3xl max-w-4xl w-full p-5 md:p-7 shadow-2xl my-auto">
             <h2 className="text-2xl md:text-3xl font-black text-center text-white mb-1">
-              选择角色与 AI 难度
+              技能麻将 · 对局大厅
             </h2>
             <p className="text-center text-gray-400 text-xs mb-4">
-              每位角色开局拥有 2 枚技能币 · 全新角色「阿姨」已加入牌局
+              支持单机 AI 练习与好友联机房间同台竞技 · 每步 30 秒倒计时
             </p>
+
+            {/* 模式切换：单机 AI 模式 vs 联机好友房间 */}
+            <div className="flex justify-center space-x-3 mb-5">
+              <button
+                onClick={() => setGameMode('SINGLE')}
+                className={`px-5 py-2 rounded-xl font-black text-xs md:text-sm flex items-center border-2 transition-all ${
+                  gameMode === 'SINGLE'
+                    ? 'bg-amber-500 text-black border-yellow-300 shadow-lg'
+                    : 'bg-neutral-800 text-gray-300 border-neutral-700 hover:bg-neutral-700'
+                }`}
+              >
+                <Brain size={16} className="mr-1.5" /> 单机 AI 模式
+              </button>
+              <button
+                onClick={() => {
+                  setGameMode('ONLINE');
+                  if (!activeRoomCode) handleCreateOrJoinRoom();
+                }}
+                className={`px-5 py-2 rounded-xl font-black text-xs md:text-sm flex items-center border-2 transition-all ${
+                  gameMode === 'ONLINE'
+                    ? 'bg-cyan-500 text-black border-cyan-300 shadow-lg'
+                    : 'bg-neutral-800 text-gray-300 border-neutral-700 hover:bg-neutral-700'
+                }`}
+              >
+                <Globe size={16} className="mr-1.5" /> 联机对战房间 (支持多窗口/好友同玩)
+              </button>
+            </div>
+
+            {/* 联机大厅房间配置面板 */}
+            {gameMode === 'ONLINE' && (
+              <div className="bg-neutral-950/90 border-2 border-cyan-500/50 rounded-2xl p-4 mb-5 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-bold text-cyan-300">你的昵称:</span>
+                    <input
+                      type="text"
+                      value={playerName}
+                      onChange={(e) => setPlayerName(e.target.value)}
+                      className="bg-neutral-800 border border-neutral-600 rounded-lg px-2.5 py-1 text-xs text-white w-28"
+                      placeholder="输入昵称"
+                    />
+                    <span className="text-xs font-bold text-cyan-300 ml-2">房间号:</span>
+                    <input
+                      type="text"
+                      value={roomCode}
+                      onChange={(e) => setRoomCode(e.target.value.toUpperCase())}
+                      className="bg-neutral-800 border border-cyan-600 rounded-lg px-2.5 py-1 text-xs font-black text-yellow-300 w-24 uppercase"
+                      placeholder="如 8888"
+                    />
+                    <button
+                      onClick={() => handleCreateOrJoinRoom(roomCode)}
+                      className="bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow"
+                    >
+                      创建 / 加入房间
+                    </button>
+                  </div>
+
+                  {activeRoomCode && (
+                    <div className="flex items-center space-x-2">
+                      <span className="text-xs text-gray-300">
+                        当前房间: <strong className="text-yellow-400 text-sm">#{activeRoomCode}</strong>
+                      </span>
+                      <button
+                        onClick={() => {
+                          if (navigator.clipboard) {
+                            navigator.clipboard.writeText(activeRoomCode);
+                            setCopySuccess(true);
+                            setTimeout(() => setCopySuccess(false), 2000);
+                          }
+                        }}
+                        className="bg-neutral-800 hover:bg-neutral-700 border border-neutral-600 text-xs px-2.5 py-1 rounded flex items-center text-cyan-300"
+                      >
+                        <Copy size={12} className="mr-1" /> {copySuccess ? '已复制' : '复制房号'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* 4个座位实时预览与选座 */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 pt-2">
+                  {roomSeats.map((s) => {
+                    const isMe = s.seatId === mySeatId;
+                    return (
+                      <div
+                        key={s.seatId}
+                        onClick={() => handleSelectOnlineSeat(s.seatId)}
+                        className={`cursor-pointer p-2.5 rounded-xl border transition-all ${
+                          isMe
+                            ? 'bg-cyan-950/70 border-cyan-400 ring-1 ring-cyan-400'
+                            : 'bg-neutral-900 border-neutral-700 hover:border-neutral-500'
+                        }`}
+                      >
+                        <div className="flex justify-between items-center text-xs font-bold mb-1">
+                          <span className="text-gray-300">{s.seatId + 1}号座</span>
+                          <span className={isMe ? 'text-cyan-300' : s.isAI ? 'text-gray-500' : 'text-emerald-400'}>
+                            {isMe ? '👉 你自己' : s.isAI ? '🤖 AI替补' : '👤 真人玩家'}
+                          </span>
+                        </div>
+                        <div className="text-xs font-black text-white truncate">{isMe ? playerName : s.name}</div>
+                        <div className={`text-[11px] font-bold mt-0.5 ${ROLES_INFO[s.role]?.text || 'text-yellow-400'}`}>
+                          角色：{isMe ? selectedHumanRole : s.role}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="text-[11px] text-gray-400">
+                  💡 联机说明：将房间号发给好友（或在本机新开浏览器标签页输入相同房间号）即可加入不同座位，未坐满的空位将由 AI 自动补位！
+                </p>
+              </div>
+            )}
 
             {/* AI 难度选择栏 */}
             <div className="mb-5">
@@ -2108,7 +2768,7 @@ export default function App() {
 
             {/* 角色选择栏 */}
             <div className="text-xs font-bold text-gray-300 mb-2 flex items-center">
-              <Users size={14} className="mr-1.5 text-yellow-400" /> 选择你的角色（5选1，其余随机分配给3名AI）：
+              <Users size={14} className="mr-1.5 text-yellow-400" /> 选择你的角色（5选1）：
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
               {Object.values(ROLES_INFO).map(role => {
@@ -2116,7 +2776,7 @@ export default function App() {
                 return (
                   <div
                     key={role.name}
-                    onClick={() => setSelectedHumanRole(role.name)}
+                    onClick={() => handleChangeRoleInLobby(role.name)}
                     className={`cursor-pointer rounded-2xl p-3.5 border-2 transition-all ${
                       isSelected
                         ? `${role.border} bg-neutral-800 scale-[1.01] shadow-xl`
@@ -2152,7 +2812,9 @@ export default function App() {
                 onClick={() => startNewGame(selectedHumanRole, aiDifficulty)}
                 className="bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black font-black px-8 py-3 rounded-xl text-base shadow-xl"
               >
-                以【{selectedHumanRole}】开始对局 ({AI_DIFFICULTIES[aiDifficulty].name})
+                {gameMode === 'ONLINE'
+                  ? `开始联机房间 #${activeRoomCode} 对局 (座位 ${mySeatId + 1} · ${selectedHumanRole})`
+                  : `以【${selectedHumanRole}】开始单机对局 (${AI_DIFFICULTIES[aiDifficulty].name})`}
               </button>
             </div>
           </div>
@@ -2163,9 +2825,12 @@ export default function App() {
       {gamePhase === 'SKILL_MODAL' && qianshuData && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
           <div className="bg-neutral-900 border-2 border-yellow-500 rounded-2xl p-6 max-w-lg w-full shadow-2xl">
-            <h3 className="text-xl font-black text-yellow-400 mb-1 flex items-center">
-              <Eye className="mr-2" /> 老千 · 千术控牌
-            </h3>
+            <div className="flex justify-between items-center mb-1">
+              <h3 className="text-xl font-black text-yellow-400 flex items-center">
+                <Eye className="mr-2" /> 老千 · 千术控牌
+              </h3>
+              <span className="text-xs font-bold text-amber-300">⏱️ {timeLeft}s</span>
+            </div>
             <p className="text-xs text-gray-400 mb-4">
               第1步：点击选择 1 张收入手牌（若选花牌将自动补花）：
             </p>
@@ -2192,7 +2857,6 @@ export default function App() {
               ))}
             </div>
 
-            {/* 剩余2张排序与放回位置 */}
             <div className="bg-neutral-800 p-3 rounded-xl mb-5 space-y-3 text-xs">
               <div className="flex justify-between items-center">
                 <span className="text-gray-300 font-bold">第2步：其余 2 张放回位置：</span>
@@ -2248,9 +2912,9 @@ export default function App() {
               你要强行碰出 <strong className="text-yellow-300">【{pendingReactions.discardRecord.tile}】</strong>。系统会自动扣除你手中 1 张【{pendingReactions.discardRecord.tile}】，请从下方其余手牌中点击选择 1 张<strong>废牌</strong>充当第 2 张碰牌材料（碰出后直接轮到你出牌）：
             </p>
             <div className="flex flex-wrap justify-center gap-2 mb-5">
-              {humanPlayer.hand.map((t, idx) => {
+              {bottomPlayer?.hand.map((t, idx) => {
                 const targetTile = pendingReactions.discardRecord.tile;
-                const firstTargetIdx = humanPlayer.hand.indexOf(targetTile);
+                const firstTargetIdx = bottomPlayer.hand.indexOf(targetTile);
                 const isReservedTarget = idx === firstTargetIdx;
                 return (
                   <div key={idx} className="flex flex-col items-center">
@@ -2311,7 +2975,7 @@ export default function App() {
             <p className="text-xs text-gray-300 mb-3">
               声明一种花色，在你的下个回合开始前，全场所有玩家<strong>禁止打出 / 胡 / 作为副露亮出</strong>该花色的牌（除非无其他牌可打）：
             </p>
-            {humanPlayer && humanPlayer.melds.some(m => m.type === 'peng') && humanFlowerInfo.total - 1 < 4 && (
+            {bottomPlayer && bottomPlayer.melds.some(m => m.type === 'peng') && humanFlowerInfo.total - 1 < 4 && (
               <div className="bg-amber-950/80 border border-amber-500 text-amber-200 text-[11px] p-2 rounded-lg mb-4">
                 ⚠️ 提醒：你当前已碰牌，消耗 1 枚技能币后你的有效花数将变为 {humanFlowerInfo.total - 1} 花（低于4花解锁线）。
               </div>
@@ -2379,7 +3043,7 @@ export default function App() {
                 onClick={() => setShowRoleSelectModal(true)}
                 className="bg-neutral-700 hover:bg-neutral-600 text-white font-bold px-6 py-2.5 rounded-xl"
               >
-                更换角色 / 难度
+                更换模式 / 角色
               </button>
             </div>
           </div>
