@@ -1,60 +1,32 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  Coins,
-  Flower,
-  ChevronRight,
-  Eye,
-  Info,
-  ArrowUpDown,
-  Sparkles,
-  RefreshCw,
-  Trophy,
-  Users,
-  Check,
-  Ban,
-  Brain,
-  AlertCircle,
-  RotateCcw,
-  RotateCw,
-  Lock,
-  Calculator,
-  ChevronDown,
-  ChevronUp,
-  Timer,
-  Globe,
-  Copy,
-  Play,
-  Pause
+  Coins, Flower, ChevronRight, Eye, Info, ArrowUpDown, Sparkles, RefreshCw, Trophy, Users, Check, Ban, Brain, AlertCircle, RotateCcw, RotateCw, Lock, Calculator, ChevronDown, ChevronUp, Timer, Globe, Copy, Play, Pause
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
-import {
-  getAuth,
-  signInAnonymously,
-  signInWithCustomToken,
-  onAuthStateChanged
-} from 'firebase/auth';
-import {
-  getFirestore,
-  doc,
-  setDoc,
-  getDoc,
-  onSnapshot
-} from 'firebase/firestore';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore';
 
 // --- 云端同步初始化 (支持跨设备联机 + 本地跨标签页 BroadcastChannel 双通道同步) ---
 let db = null;
 let auth = null;
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'skill-mahjong-online';
 
+// 请确保这里的 API Key 替换成了你在 Firebase 后台复制的真实配置
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyD0e_IKe0jyW6pdohHNypyXn4eJZ9r3Q7I",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "skill-mahjong.firebaseapp.com",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "skill-mahjong",
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "skill-mahjong.firebasestorage.app",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "800445625190",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:800445625190:web:b4103d3c8e76d4b98e8ea7"
+};
+
 try {
-  if (typeof __firebase_config !== 'undefined' && __firebase_config) {
-    const firebaseConfig = JSON.parse(__firebase_config);
-    const firebaseApp = initializeApp(firebaseConfig);
-    auth = getAuth(firebaseApp);
-    db = getFirestore(firebaseApp);
-  }
-} catch (err) {
-  console.warn('Cloud sync fallback to local BroadcastChannel:', err);
+  const firebaseApp = initializeApp(firebaseConfig);
+  auth = getAuth(firebaseApp);
+  db = getFirestore(firebaseApp);
+} catch (e) {
+  console.warn("Firebase 初始化失败，请检查配置:", e);
 }
 
 // --- 常量与牌库定义 ---
@@ -63,7 +35,6 @@ const WINDS = ['东风', '南风', '西风', '北风'];
 const DRAGONS = ['中', '发', '白'];
 const FLOWERS = ['春', '夏', '秋', '冬', '梅', '兰', '竹', '菊'];
 
-// 标准34种可进手牌/胡牌的牌面（不含花牌和中发白）
 const ALL_PLAYABLE_TILES = [
   ...SUITS.flatMap(s => [1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => `${n}${s}`)),
   ...WINDS
@@ -77,63 +48,32 @@ const AI_DIFFICULTIES = {
 
 const ROLES_INFO = {
   '老千': {
-    name: '老千',
-    title: '命运操盘手',
-    color: 'from-amber-500 to-yellow-600',
-    border: 'border-yellow-500',
-    text: 'text-yellow-400',
-    activeName: '千术 (1币)',
-    activeDesc: '查看牌山顶端的3张牌，将其中1张直接收入手牌，其余2张按任意顺序放回牌山顶或牌山底。',
-    passiveName: '步步生花',
-    passiveDesc: '手中花牌数量大于4时触发：轮到老千的轮次时，可选择消耗1张花牌换取额外的抽牌打牌机会（可连续触发）。'
+    name: '老千', title: '命运操盘手', color: 'from-amber-500 to-yellow-600', border: 'border-yellow-500', text: 'text-yellow-400',
+    activeName: '千术 (1币)', activeDesc: '查看牌山顶端的3张牌，将其中1张直接收入手牌，其余2张按任意顺序放回牌山顶或牌山底。',
+    passiveName: '步步生花', passiveDesc: '手中花牌数量大于4时触发：轮到老千的轮次时，可选择消耗1张花牌换取额外的抽牌打牌机会（可连续触发）。'
   },
   '麦咭': {
-    name: '麦咭',
-    title: '机械改装师',
-    color: 'from-blue-500 to-cyan-600',
-    border: 'border-blue-500',
-    text: 'text-blue-400',
-    activeName: '刻意求工 (1币)',
-    activeDesc: '当其他玩家打出一张牌，而你手中只有1张相同的牌时，可将手里任意1张废牌当作第2张牌强行“碰”出。',
-    passiveName: '花团锦簇',
-    passiveDesc: '麦咭打出的每个副露（吃、碰、杠）可以额外算作半张花牌（0.5花）。'
+    name: '麦咭', title: '机械改装师', color: 'from-blue-500 to-cyan-600', border: 'border-blue-500', text: 'text-blue-400',
+    activeName: '刻意求工 (1币)', activeDesc: '当其他玩家打出一张牌，而你手中只有1张相同的牌时，可将手里任意1张废牌当作第2张牌强行“碰”出。',
+    passiveName: '花团锦簇', passiveDesc: '麦咭打出的每个副露（吃、碰、杠）可以额外算作半张花牌（0.5花）。'
   },
   '灵风': {
-    name: '灵风',
-    title: '疾风刺客',
-    color: 'from-emerald-500 to-green-600',
-    border: 'border-green-500',
-    text: 'text-green-400',
-    activeName: '乘风 (1币)',
-    activeDesc: '无视上下家，当场上任意玩家打出一张牌时，灵风可以选择吃牌并跳转到灵风的轮次。',
-    passiveName: '北风，北北风',
-    passiveDesc: '灵风抽取的每一张北风牌自动算作 1 张花牌（自动置入花牌区并补牌），且拥有的其余风牌（东、南、西风）每张额外算作 0.5 张花牌。'
+    name: '灵风', title: '疾风刺客', color: 'from-emerald-500 to-green-600', border: 'border-green-500', text: 'text-green-400',
+    activeName: '乘风 (1币)', activeDesc: '无视上下家，当场上任意玩家打出一张牌时，灵风可以选择吃牌并跳转到灵风的轮次。',
+    passiveName: '北风，北北风', passiveDesc: '灵风抽取的每一张北风牌自动算作 1 张花牌（自动置入花牌区并补牌），且拥有的其余风牌（东、南、西风）每张额外算作 0.5 张花牌。'
   },
   '典当师': {
-    name: '典当师',
-    title: '黑市垄断者',
-    color: 'from-purple-500 to-fuchsia-600',
-    border: 'border-purple-500',
-    text: 'text-purple-400',
-    activeName: '售罄 (1币)',
-    activeDesc: '在出牌阶段使用。声明一种花色（万、筒、条）。下个回合开始前，全场禁止打出/胡/作为副露亮出该花色的牌（除非无其他牌可打）。',
-    passiveName: '繁花似锦',
-    passiveDesc: '手中的每一组暗刻和每一个技能币都额外算作 1 张花牌。'
+    name: '典当师', title: '黑市垄断者', color: 'from-purple-500 to-fuchsia-600', border: 'border-purple-500', text: 'text-purple-400',
+    activeName: '售罄 (1币)', activeDesc: '在出牌阶段使用。声明一种花色（万、筒、条）。下个回合开始前，全场禁止打出/胡/作为副露亮出该花色的牌（除非无其他牌可打）。',
+    passiveName: '繁花似锦', passiveDesc: '手中的每一组暗刻和每一个技能币都额外算作 1 张花牌。'
   },
   '阿姨': {
-    name: '阿姨',
-    title: '牌桌统治者',
-    color: 'from-rose-500 to-orange-600',
-    border: 'border-rose-500',
-    text: 'text-rose-400',
-    activeName: '闲人免进 (1币) / 风水轮流转 (1币)',
-    activeDesc: '【闲人免进】指定当前下家1巡禁止任何行动（禁响应、跳过摸打）；【风水轮流转】转换本局游戏的出牌顺序（顺时针⇄逆时针）。',
-    passiveName: '神机妙算',
-    passiveDesc: '开局自带记牌器，系统自动记录并实时展示每张牌剩下的未知数量。'
+    name: '阿姨', title: '牌桌统治者', color: 'from-rose-500 to-orange-600', border: 'border-rose-500', text: 'text-rose-400',
+    activeName: '闲人免进 (1币) / 风水轮流转 (1币)', activeDesc: '【闲人免进】指定当前下家1巡禁止任何行动（禁响应、跳过摸打）；【风水轮流转】转换本局游戏的出牌顺序（顺时针⇄逆时针）。',
+    passiveName: '神机妙算', passiveDesc: '开局自带记牌器，系统自动记录并实时展示每张牌剩下的未知数量。'
   }
 };
 
-// 纯随机洗牌 (Fisher-Yates) - 包含 108序数牌 + 16风牌 + 12中发白 + 8花牌 = 144张
 const generatePureRandomDeck = () => {
   let deck = [];
   for (let s of SUITS) {
@@ -157,7 +97,6 @@ const generatePureRandomDeck = () => {
   return deck;
 };
 
-// 判断是否为花牌（灵风抽到的「北风」直接视作花牌自动进花牌区并补牌）
 const isFlowerTile = (tile, role = null) => {
   if (!tile) return false;
   if (DRAGONS.includes(tile) || tile.startsWith('花-')) return true;
@@ -172,7 +111,6 @@ const getTileSuit = (tile) => {
   return '风';
 };
 
-// 理牌权重计算：万(1-9) -> 筒(11-19) -> 条(21-29) -> 东南西北(31-34)
 const getTileSortWeight = (tile) => {
   if (tile.endsWith('万')) return parseInt(tile[0], 10);
   if (tile.endsWith('筒')) return 10 + parseInt(tile[0], 10);
@@ -185,7 +123,6 @@ const sortHandTiles = (hand) => {
   return [...hand].sort((a, b) => getTileSortWeight(a) - getTileSortWeight(b));
 };
 
-// 抽牌并自动补花（支持灵风自动将抽取的北风放入花牌区并补牌）
 const drawAndResolveFlowers = (deck, count, role = null) => {
   let currentDeck = [...deck];
   let drawnHand = [];
@@ -202,7 +139,6 @@ const drawAndResolveFlowers = (deck, count, role = null) => {
   return { drawnHand, drawnFlowers, remainingDeck: currentDeck };
 };
 
-// 计算某玩家当前总有效花牌数（新增：灵风其余风牌东/南/西每张算 0.5 花）
 const getFlowerBreakdown = (player) => {
   const baseFlowers = player.flowerTiles.length;
   const mingGangCount = player.melds.filter(m => m.type === 'minggang').length;
@@ -215,7 +151,6 @@ const getFlowerBreakdown = (player) => {
     details.push(`常规花牌: ${normalFlowers}`);
     if (northInFlowers > 0) details.push(`北风花牌: +${northInFlowers}`);
 
-    // 统计灵风拥有的其余风牌（东风、南风、西风，包含手牌、副露、弃牌）每张算 0.5 花
     const isOtherWind = (t) => t === '东风' || t === '南风' || t === '西风';
     const handOtherWinds = player.hand.filter(isOtherWind).length;
     const meldOtherWinds = player.melds.reduce((acc, m) => acc + m.tiles.filter(isOtherWind).length, 0);
@@ -244,14 +179,9 @@ const getFlowerBreakdown = (player) => {
   }
 
   const rawTotal = Math.round((baseFlowers + mingGangCount + bonus) * 10) / 10;
-
-  return {
-    total: rawTotal,
-    details
-  };
+  return { total: rawTotal, details };
 };
 
-// --- 完备无死角胡牌算法 ---
 const canFormSets = (tiles) => {
   if (tiles.length === 0) return true;
   const sorted = sortHandTiles(tiles);
@@ -425,13 +355,12 @@ const computeRemainingTileCounts = (players, viewerId = 0) => {
 };
 
 export default function App() {
-  // --- 模式与联机状态 ---
-  const [gameMode, setGameMode] = useState('SINGLE'); // 'SINGLE' | 'ONLINE'
+  const [gameMode, setGameMode] = useState('SINGLE'); 
   const [user, setUser] = useState(null);
   const [playerName, setPlayerName] = useState('雀神玩家');
   const [roomCode, setRoomCode] = useState('');
   const [activeRoomCode, setActiveRoomCode] = useState('');
-  const [mySeatId, setMySeatId] = useState(0); // 本地玩家座位号 (0-3)
+  const [mySeatId, setMySeatId] = useState(0); 
   const [roomSeats, setRoomSeats] = useState([
     { seatId: 0, uid: 'local', name: '雀神玩家', role: '阿姨', isAI: false },
     { seatId: 1, uid: null, name: 'AI-1 (待加入)', role: '麦咭', isAI: true },
@@ -440,7 +369,6 @@ export default function App() {
   ]);
   const [copySuccess, setCopySuccess] = useState(false);
 
-  // --- 游戏核心状态 ---
   const [selectedHumanRole, setSelectedHumanRole] = useState('阿姨');
   const [aiDifficulty, setAiDifficulty] = useState('NORMAL');
   const [showRoleSelectModal, setShowRoleSelectModal] = useState(true);
@@ -450,9 +378,7 @@ export default function App() {
   const [turn, setTurn] = useState(0);
   const [turnDirection, setTurnDirection] = useState(1);
   const [gamePhase, setGamePhase] = useState('ROLE_SELECT');
-  // ROLE_SELECT, DRAW, ACTION, REACTION, LAOQIAN_EXTRA_PROMPT, SKILL_MODAL, WINNER, DRAW_GAME
 
-  // --- 30秒出牌倒计时状态 ---
   const [timeLeft, setTimeLeft] = useState(30);
   const [timerEnabled, setTimerEnabled] = useState(true);
 
@@ -465,7 +391,6 @@ export default function App() {
   const [showCardCounter, setShowCardCounter] = useState(true);
   const [selectedHandIdx, setSelectedHandIdx] = useState(null);
 
-  // 弹窗与技能交互状态
   const [qianshuData, setQianshuData] = useState(null);
   const [maijiModal, setMaijiModal] = useState(false);
   const [lingfengCombos, setLingfengCombos] = useState(null);
@@ -476,7 +401,6 @@ export default function App() {
   const broadcastChannelRef = useRef(null);
   const isApplyingRemoteRef = useRef(false);
 
-  // 1. Firebase 匿名登录与本地 BroadcastChannel 初始化
   useEffect(() => {
     if (auth) {
       const initAuth = async () => {
@@ -496,11 +420,9 @@ export default function App() {
     }
   }, []);
 
-  // 2. 监听联机房间状态 (支持 Firestore 跨网同步 + BroadcastChannel 同浏览器多开测试)
   useEffect(() => {
     if (gameMode !== 'ONLINE' || !activeRoomCode) return;
 
-    // 通道 A：本地多标签页 BroadcastChannel 实时同步
     if (typeof BroadcastChannel !== 'undefined') {
       const bc = new BroadcastChannel(`mahjong_room_${activeRoomCode}`);
       broadcastChannelRef.current = bc;
@@ -512,10 +434,9 @@ export default function App() {
       };
     }
 
-    // 通道 B：Firebase Firestore 云端房间实时监听
     let unsubFirestore = null;
-    if (db && user) {
-      const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'mahjong_rooms', activeRoomCode);
+    if (db) {
+      const roomRef = doc(db, 'mahjong_rooms', activeRoomCode);
       unsubFirestore = onSnapshot(
         roomRef,
         (snapshot) => {
@@ -534,10 +455,8 @@ export default function App() {
       }
       if (unsubFirestore) unsubFirestore();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gameMode, activeRoomCode, user]);
+  }, [gameMode, activeRoomCode]);
 
-  // 应用远端同步过来的房间状态
   const applyRemoteRoomState = (remote) => {
     if (!remote) return;
     isApplyingRemoteRef.current = true;
@@ -562,11 +481,11 @@ export default function App() {
     }, 60);
   };
 
-  // 推送房间最新状态到云端与其它客户端
   const pushRoomState = async (overrides = {}) => {
     if (gameMode !== 'ONLINE' || !activeRoomCode || isApplyingRemoteRef.current) return;
 
     const payload = {
+      roomCode: activeRoomCode,
       roomSeats: JSON.stringify(overrides.roomSeats || roomSeats),
       aiDifficulty: overrides.aiDifficulty || aiDifficulty,
       gameStarted: overrides.gameStarted !== undefined ? overrides.gameStarted : !showRoleSelectModal,
@@ -587,9 +506,9 @@ export default function App() {
       broadcastChannelRef.current.postMessage({ type: 'ROOM_SYNC', payload });
     }
 
-    if (db && user) {
+    if (db) {
       try {
-        const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'mahjong_rooms', activeRoomCode);
+        const roomRef = doc(db, 'mahjong_rooms', activeRoomCode);
         await setDoc(roomRef, payload, { merge: true });
       } catch (e) {
         console.warn('Failed to sync state to cloud:', e);
@@ -607,7 +526,6 @@ export default function App() {
     setLogs(prev => [...prev, msg]);
   };
 
-  // --- 30秒出牌倒计时核心逻辑 ---
   useEffect(() => {
     if (['DRAW', 'ACTION', 'REACTION', 'LAOQIAN_EXTRA_PROMPT', 'SKILL_MODAL'].includes(gamePhase) && !showRoleSelectModal) {
       setTimeLeft(30);
@@ -630,12 +548,9 @@ export default function App() {
     }, 1000);
 
     return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turn, gamePhase, timerEnabled, showRoleSelectModal, pendingReactions, qianshuData, players]);
 
-  // 当30秒倒计时归零时自动执行默认操作
   const handleTurnTimeout = () => {
-    // 1. 响应阶段超时：如果是等待当前客户端玩家响应，自动选择“过”
     if (gamePhase === 'REACTION' && pendingReactions) {
       if (pendingReactions.responderId === undefined || pendingReactions.responderId === mySeatId) {
         addLog(`⏰ [${players[mySeatId]?.role}] 响应思考超时（30秒），系统已自动选择【过】！`);
@@ -644,7 +559,6 @@ export default function App() {
       return;
     }
 
-    // 2. 老千步步生花询问超时：自动放弃额外摸打并推进回合
     if (gamePhase === 'LAOQIAN_EXTRA_PROMPT' && turn === mySeatId) {
       addLog(`⏰ [${players[mySeatId]?.role}] 步步生花确认超时（30秒），自动结束本回合！`);
       const nextId = getNextPlayerId(mySeatId, turnDirection);
@@ -652,7 +566,6 @@ export default function App() {
       return;
     }
 
-    // 3. 当前轮到本机玩家操作超时
     if (turn === mySeatId) {
       const me = players[mySeatId];
       if (!me) return;
@@ -677,69 +590,93 @@ export default function App() {
     }
   };
 
-  // 获取某玩家的当前“下家”与“上家”座位号（随风水轮流转动态变化）
   const getNextPlayerId = (currentId, dir = turnDirection) => (currentId + dir + 4) % 4;
   const getUpperPlayerId = (currentId, dir = turnDirection) => (currentId - dir + 4) % 4;
 
-  // --- 创建或加入联机房间 ---
   const handleCreateOrJoinRoom = async (targetCode) => {
+    if (!db) {
+      alert('Firebase Firestore 未初始化！');
+      return;
+    }
+
+    let currentUser = auth?.currentUser || user;
+    if (!currentUser && auth) {
+      try {
+        const cred = await signInAnonymously(auth);
+        currentUser = cred.user;
+        setUser(currentUser);
+      } catch (authErr) {
+        console.warn('Auth fallback:', authErr);
+      }
+    }
+    const myUid = currentUser?.uid || `guest_${Math.random().toString(36).slice(2, 8)}`;
+
     const cleanCode = (targetCode || roomCode || Math.floor(1000 + Math.random() * 9000).toString()).trim().toUpperCase();
     setRoomCode(cleanCode);
     setActiveRoomCode(cleanCode);
 
-    const myUid = user?.uid || `local_${Math.random().toString(36).slice(2, 7)}`;
+    const roomRef = doc(db, 'mahjong_rooms', cleanCode);
 
-    if (db && user) {
-      try {
-        const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'mahjong_rooms', cleanCode);
-        const snap = await getDoc(roomRef);
-        if (snap.exists()) {
-          const data = snap.data();
-          const existingSeats = data.roomSeats ? JSON.parse(data.roomSeats) : roomSeats;
-          // 查找空位或已存在座位
-          let assignedSeat = existingSeats.findIndex(s => s.uid === myUid);
-          if (assignedSeat === -1) {
-            assignedSeat = existingSeats.findIndex(s => s.isAI);
-          }
-          if (assignedSeat === -1) assignedSeat = 0;
+    try {
+      const snap = await getDoc(roomRef);
 
-          const usedRoles = existingSeats.filter((_, i) => i !== assignedSeat).map(s => s.role);
-          const availableRole = !usedRoles.includes(selectedHumanRole)
-            ? selectedHumanRole
-            : Object.keys(ROLES_INFO).find(r => !usedRoles.includes(r)) || '麦咭';
+      if (snap.exists()) {
+        const data = snap.data();
+        const existingSeats = data.roomSeats ? JSON.parse(data.roomSeats) : roomSeats;
 
-          const updatedSeats = existingSeats.map((s, idx) =>
-            idx === assignedSeat
-              ? { seatId: idx, uid: myUid, name: playerName || `玩家${idx + 1}`, role: availableRole, isAI: false }
-              : s
-          );
-
-          setMySeatId(assignedSeat);
-          setSelectedHumanRole(availableRole);
-          setRoomSeats(updatedSeats);
-          await setDoc(roomRef, { roomSeats: JSON.stringify(updatedSeats) }, { merge: true });
-          return;
+        let assignedSeat = existingSeats.findIndex(s => s.uid === myUid);
+        if (assignedSeat === -1) {
+          assignedSeat = existingSeats.findIndex(s => s.isAI);
         }
-      } catch (e) {
-        console.warn('Join room cloud check failed:', e);
-      }
-    }
+        if (assignedSeat === -1) assignedSeat = 0;
 
-    // 初始化为房主 (座位 0)
-    const allRoles = Object.keys(ROLES_INFO);
-    const otherRoles = allRoles.filter(r => r !== selectedHumanRole);
-    const initSeats = [
-      { seatId: 0, uid: myUid, name: playerName || '房主', role: selectedHumanRole, isAI: false },
-      { seatId: 1, uid: null, name: 'AI-1 (可加入)', role: otherRoles[0], isAI: true },
-      { seatId: 2, uid: null, name: 'AI-2 (可加入)', role: otherRoles[1], isAI: true },
-      { seatId: 3, uid: null, name: 'AI-3 (可加入)', role: otherRoles[2], isAI: true }
-    ];
-    setMySeatId(0);
-    setRoomSeats(initSeats);
-    pushRoomState({ roomSeats: initSeats, gameStarted: false });
+        const usedRoles = existingSeats.filter((_, i) => i !== assignedSeat).map(s => s.role);
+        const availableRole = !usedRoles.includes(selectedHumanRole)
+          ? selectedHumanRole
+          : Object.keys(ROLES_INFO).find(r => !usedRoles.includes(r)) || '麦咭';
+
+        const updatedSeats = existingSeats.map((s, idx) =>
+          idx === assignedSeat
+            ? { seatId: idx, uid: myUid, name: playerName || `玩家${idx + 1}`, role: availableRole, isAI: false }
+            : s
+        );
+
+        setMySeatId(assignedSeat);
+        setSelectedHumanRole(availableRole);
+        setRoomSeats(updatedSeats);
+
+        await setDoc(roomRef, {
+          roomCode: cleanCode,
+          roomSeats: JSON.stringify(updatedSeats),
+          updatedAt: Date.now()
+        }, { merge: true });
+        return;
+      }
+
+      const allRoles = Object.keys(ROLES_INFO);
+      const otherRoles = allRoles.filter(r => r !== selectedHumanRole);
+      const initSeats = [
+        { seatId: 0, uid: myUid, name: playerName || '房主', role: selectedHumanRole, isAI: false },
+        { seatId: 1, uid: null, name: 'AI-1 (可加入)', role: otherRoles[0], isAI: true },
+        { seatId: 2, uid: null, name: 'AI-2 (可加入)', role: otherRoles[1], isAI: true },
+        { seatId: 3, uid: null, name: 'AI-3 (可加入)', role: otherRoles[2], isAI: true }
+      ];
+
+      setMySeatId(0);
+      setRoomSeats(initSeats);
+
+      await setDoc(roomRef, {
+        roomCode: cleanCode,
+        roomSeats: JSON.stringify(initSeats),
+        gameStarted: false,
+        updatedAt: Date.now()
+      });
+    } catch (error) {
+      console.error('Room error:', error);
+      alert(`联机失败：${error.message}`);
+    }
   };
 
-  // 联机大厅切换座位或角色
   const handleSelectOnlineSeat = (targetSeatId) => {
     const myUid = user?.uid || 'local';
     const updated = roomSeats.map(s => {
@@ -767,7 +704,6 @@ export default function App() {
     }
   };
 
-  // --- 初始化对局 (支持单机 AI 与联机多人房间) ---
   const startNewGame = (chosenRole = selectedHumanRole, chosenDiff = aiDifficulty) => {
     const allRoles = ['老千', '麦咭', '灵风', '典当师', '阿姨'];
     let freshDeck = generatePureRandomDeck();
@@ -776,9 +712,8 @@ export default function App() {
     let initPlayers = [];
 
     if (gameMode === 'ONLINE' && activeRoomCode) {
-      // 联机模式：确保4个座位角色不重复，空位由 AI 替补
       const usedRoles = new Set();
-      constresolvedSeats = roomSeats.map((seat, idx) => {
+      const resolvedSeats = roomSeats.map((seat, idx) => {
         let r = seat.role;
         if (usedRoles.has(r)) {
           r = allRoles.find(cand => !usedRoles.has(cand)) || r;
@@ -805,7 +740,6 @@ export default function App() {
         };
       });
     } else {
-      // 单机模式：本机固定为座位 0
       setMySeatId(0);
       const remainingRoles = allRoles.filter(r => r !== chosenRole);
       for (let i = remainingRoles.length - 1; i > 0; i--) {
@@ -886,7 +820,6 @@ export default function App() {
     }
   };
 
-  // --- 回合推进（处理典当师封锁解除 & 阿姨「闲人免进」跳过下家1巡） ---
   const advanceTurn = (targetPlayerId, currentPlayersState = players, customLogs = null) => {
     let actualNextId = targetPlayerId;
     let workingPlayers = [...currentPlayersState];
@@ -932,7 +865,6 @@ export default function App() {
     }
   };
 
-  // --- 摸牌动作 ---
   const handleDrawTile = (playerId, isExtraFlowersSkill = false, customPlayers = null) => {
     const activePlayers = customPlayers || players;
     const targetPlayer = activePlayers[playerId];
@@ -999,7 +931,6 @@ export default function App() {
     }
   };
 
-  // --- 检查玩家是否被禁打某张牌 (典当师-售罄) ---
   const canPlayerDiscardTile = (player, tile) => {
     if (!bannedSuitInfo || bannedSuitInfo.ownerId === player.id) return true;
     const suit = getTileSuit(tile);
@@ -1008,7 +939,6 @@ export default function App() {
     return !hasOtherOption;
   };
 
-  // --- 手牌点击（支持理牌交换 + 出牌） ---
   const handleHumanTileClick = (index) => {
     const human = players[mySeatId];
     if (!human) return;
@@ -1046,7 +976,6 @@ export default function App() {
     setSelectedHandIdx(null);
   };
 
-  // --- 执行出牌并进入全场响应判定 ---
   const executeDiscard = (playerId, tileIndex) => {
     const player = players[playerId];
     const discardedTile = player.hand[tileIndex];
@@ -1074,12 +1003,10 @@ export default function App() {
     evaluateReactionsAfterDiscard(updatedPlayers, discardRecord, nextLogs);
   };
 
-  // --- 评估打出一张牌后的吃、碰、杠、胡与技能响应（支持多人类玩家座位） ---
   const evaluateReactionsAfterDiscard = (currentPlayers, discardRecord, currentLogs = logs) => {
     const { playerId: discarderId, tile } = discardRecord;
     const tileSuit = getTileSuit(tile);
 
-    // 1. 检查所有非 AI 玩家是否有可响应动作
     for (let step = 1; step <= 3; step++) {
       const checkId = (discarderId + step * turnDirection + 4) % 4;
       const candidate = currentPlayers[checkId];
@@ -1129,11 +1056,9 @@ export default function App() {
       }
     }
 
-    // 2. 若无真人玩家响应，评估 AI 的响应
     processAIReactions(currentPlayers, discardRecord, currentLogs);
   };
 
-  // --- 当无人吃碰胡打断时，检查打牌者如果是「老千」且花牌 > 4，是否发动《步步生花》额外摸打 ---
   const checkLaoqianExtraTurnOrAdvance = (currentPlayers, discarderId, currentLogs = logs) => {
     const discarder = currentPlayers[discarderId];
     if (discarder && discarder.role === '老千') {
@@ -1188,7 +1113,6 @@ export default function App() {
     handleDrawTile(playerId, true, updatedPlayers);
   };
 
-  // --- AI 响应吃碰胡逻辑 ---
   const processAIReactions = (currentPlayers, discardRecord, currentLogs = logs) => {
     const { playerId: discarderId, tile } = discardRecord;
     const tileSuit = getTileSuit(tile);
@@ -1196,7 +1120,6 @@ export default function App() {
     const skillProb = aiDifficulty === 'EASY' ? 0.15 : aiDifficulty === 'NORMAL' ? 0.45 : 0.85;
     const pengProb = aiDifficulty === 'EASY' ? 0.35 : aiDifficulty === 'NORMAL' ? 0.7 : 0.95;
 
-    // 1. 检查是否有未冻结的 AI 可以点炮胡牌
     for (let i = 0; i < 4; i++) {
       if (i === discarderId) continue;
       const ai = currentPlayers[i];
@@ -1215,7 +1138,6 @@ export default function App() {
       }
     }
 
-    // 2. 检查未冻结的 AI 碰牌或技能响应
     for (let i = 0; i < 4; i++) {
       if (i === discarderId) continue;
       const ai = currentPlayers[i];
@@ -1255,7 +1177,6 @@ export default function App() {
         return;
       }
 
-      // 麦咭 AI 发动【刻意求工】
       if (ai.role === '麦咭' && ai.coins >= 1 && sameCount === 1 && ai.hand.length >= 2 && Math.random() < skillProb) {
         setTimeout(() => {
           const nextPlayers = currentPlayers.map(p => {
@@ -1289,7 +1210,6 @@ export default function App() {
         return;
       }
 
-      // 灵风 AI 发动【乘风】跨座位吃牌（1币）
       const aiUpperId = getUpperPlayerId(ai.id, turnDirection);
       if (ai.role === '灵风' && ai.coins >= 1 && discarderId !== aiUpperId) {
         const combos = getValidChiCombinations(ai.hand, tile, null);
@@ -1328,7 +1248,6 @@ export default function App() {
     checkLaoqianExtraTurnOrAdvance(currentPlayers, discarderId, currentLogs);
   };
 
-  // --- 人类玩家响应面板操作 ---
   const handleHumanPassReaction = () => {
     if (!pendingReactions) return;
     const record = pendingReactions.discardRecord;
@@ -1495,9 +1414,6 @@ export default function App() {
     }
   };
 
-  // --- 回合内主动技能：老千、典当师、阿姨 ---
-
-  // 1. 老千《千术》
   const handleOpenQianshu = () => {
     const me = players[mySeatId];
     if (turn !== mySeatId || gamePhase !== 'DRAW' || !me || me.coins < 1 || deck.length < 3) return;
@@ -1562,7 +1478,6 @@ export default function App() {
     }
   };
 
-  // 2. 典当师《售罄》
   const handleConfirmPawnBan = (suit) => {
     setPawnModal(false);
     const updatedPlayers = players.map(p => p.id === mySeatId ? { ...p, coins: p.coins - 1 } : p);
@@ -1576,7 +1491,6 @@ export default function App() {
     }
   };
 
-  // 3. 阿姨主动技能 1：《闲人免进》
   const handleAyiFreezeNext = () => {
     const human = players[mySeatId];
     if (turn !== mySeatId || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || human.role !== '阿姨' || human.coins < 1) return;
@@ -1597,7 +1511,6 @@ export default function App() {
     }
   };
 
-  // 4. 阿姨主动技能 2：《风水轮流转》
   const handleAyiReverseDirection = () => {
     const human = players[mySeatId];
     if (turn !== mySeatId || (gamePhase !== 'DRAW' && gamePhase !== 'ACTION') || human.role !== '阿姨' || human.coins < 1) return;
@@ -1614,7 +1527,6 @@ export default function App() {
     }
   };
 
-  // 5. 自己回合暗杠或明杠
   const getHumanSelfGangOptions = () => {
     if (turn !== mySeatId || gamePhase !== 'ACTION') return [];
     const human = players[mySeatId];
@@ -1649,7 +1561,6 @@ export default function App() {
     }
   };
 
-  // 6. 自摸胡牌
   const handleHumanTsumo = () => {
     const me = players[mySeatId];
     const res = checkCanHu(me, null, bannedSuitInfo);
@@ -1664,7 +1575,6 @@ export default function App() {
     }
   };
 
-  // --- 智能 AI 出牌评分器（含灵风保留风牌加成） ---
   const selectAIDiscardIndex = (aiPlayer) => {
     const validIndices = [];
     aiPlayer.hand.forEach((t, idx) => {
@@ -1678,7 +1588,6 @@ export default function App() {
 
     const counts = {};
     aiPlayer.hand.forEach(t => counts[t] = (counts[t] || 0) + 1);
-
     const remainingMap = aiPlayer.role === '阿姨' ? computeRemainingTileCounts(players, aiPlayer.id) : null;
 
     let lowestScore = Infinity;
@@ -1692,7 +1601,6 @@ export default function App() {
       if (counts[tile] >= 3) keepScore += 90;
       if (aiPlayer.role === '典当师' && counts[tile] >= 3) keepScore += 50;
 
-      // 灵风拥有风牌即算 0.5 花（即使打出到弃牌河也算 0.5 花，但凑对子碰出不仅算副露还能凑面子）
       if (aiPlayer.role === '灵风' && tile.endsWith('风') && counts[tile] >= 2) {
         keepScore += 25;
       }
@@ -1724,14 +1632,12 @@ export default function App() {
     return bestDiscardIdx;
   };
 
-  // --- AI 回合驱动逻辑（在联机模式下由房主或当前客户端驱动 AI 座位） ---
   useEffect(() => {
     if (gamePhase === 'WINNER' || gamePhase === 'DRAW_GAME' || gamePhase === 'ROLE_SELECT' || showRoleSelectModal) return;
 
     const currentActor = players[turn];
     if (!currentActor || !currentActor.isAI) return;
 
-    // 联机模式下，仅由 0 号位（或最小座位号的真人玩家）统一驱动 AI 防止重复触发
     if (gameMode === 'ONLINE') {
       const firstHumanSeat = players.find(p => !p.isAI)?.id ?? 0;
       if (mySeatId !== firstHumanSeat) return;
@@ -1847,7 +1753,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turn, gamePhase, players, deck.length, turnDirection, showRoleSelectModal]);
 
-  // --- UI 渲染辅助函数 ---
   const getTileStyle = (tile) => {
     if (!tile) return 'text-gray-800';
     if (tile.includes('万')) return 'text-red-700';
@@ -1871,15 +1776,7 @@ export default function App() {
     return (
       <div
         onClick={!isDisabled && onClick ? onClick : undefined}
-        className={`
-          relative ${sizeClasses} flex flex-col items-center justify-center rounded-md
-          border border-stone-400 shadow-md font-bold select-none transition-all duration-150
-          ${isHidden ? 'bg-gradient-to-b from-emerald-700 to-emerald-800 border-emerald-600' : 'bg-gradient-to-b from-[#FFFDF7] to-[#EFECE0]'}
-          ${onClick && !isDisabled ? 'cursor-pointer hover:-translate-y-2 hover:shadow-xl' : ''}
-          ${isSelected ? '-translate-y-3 ring-2 ring-yellow-400 bg-yellow-50' : ''}
-          ${isDisabled ? 'opacity-40 cursor-not-allowed grayscale' : ''}
-          ${!isHidden ? getTileStyle(tile) : ''}
-        `}
+        className={`relative ${sizeClasses} flex flex-col items-center justify-center rounded-md border border-stone-400 shadow-md font-bold select-none transition-all duration-150 ${isHidden ? 'bg-gradient-to-b from-emerald-700 to-emerald-800 border-emerald-600' : 'bg-gradient-to-b from-[#FFFDF7] to-[#EFECE0]'} ${onClick && !isDisabled ? 'cursor-pointer hover:-translate-y-2 hover:shadow-xl' : ''} ${isSelected ? '-translate-y-3 ring-2 ring-yellow-400 bg-yellow-50' : ''} ${isDisabled ? 'opacity-40 cursor-not-allowed grayscale' : ''} ${!isHidden ? getTileStyle(tile) : ''}`}
       >
         {!isHidden && (
           <>
@@ -1889,9 +1786,7 @@ export default function App() {
           </>
         )}
         {badge && (
-          <span className="absolute -top-2 -right-2 bg-amber-600 text-white text-[9px] px-1 rounded shadow">
-            {badge}
-          </span>
+          <span className="absolute -top-2 -right-2 bg-amber-600 text-white text-[9px] px-1 rounded shadow">{badge}</span>
         )}
       </div>
     );
@@ -1914,24 +1809,17 @@ export default function App() {
             {player.role}
             <span className="text-[10px] text-gray-400 font-normal ml-1">({player.name})</span>
             {player.id !== mySeatId && isHumanNextTarget && (
-              <span className="ml-1.5 bg-cyan-950 border border-cyan-600 text-cyan-300 text-[9px] px-1 py-0.2 rounded">
-                当前下家
-              </span>
+              <span className="ml-1.5 bg-cyan-950 border border-cyan-600 text-cyan-300 text-[9px] px-1 py-0.2 rounded">当前下家</span>
             )}
             {player.id !== mySeatId && isHumanUpperTarget && (
-              <span className="ml-1.5 bg-amber-950 border border-amber-600 text-amber-300 text-[9px] px-1 py-0.2 rounded">
-                当前上家
-              </span>
+              <span className="ml-1.5 bg-amber-950 border border-amber-600 text-amber-300 text-[9px] px-1 py-0.2 rounded">当前上家</span>
             )}
           </span>
           <div className="flex items-center space-x-2">
             <span className="flex items-center bg-yellow-950/70 border border-yellow-700/50 px-1.5 py-0.5 rounded text-yellow-300" title="技能币">
               <Coins size={12} className="mr-1 text-yellow-400" /> {player.coins}
             </span>
-            <span
-              className={`flex items-center px-1.5 py-0.5 rounded border ${totalFlw >= 4 ? 'bg-emerald-950/80 border-emerald-600 text-emerald-300' : 'bg-pink-950/70 border-pink-700/50 text-pink-300'}`}
-              title={details.join(' | ')}
-            >
+            <span className={`flex items-center px-1.5 py-0.5 rounded border ${totalFlw >= 4 ? 'bg-emerald-950/80 border-emerald-600 text-emerald-300' : 'bg-pink-950/70 border-pink-700/50 text-pink-300'}`} title={details.join(' | ')}>
               <Flower size={12} className="mr-1 text-pink-400" /> {totalFlw}花
             </span>
           </div>
@@ -1963,10 +1851,7 @@ export default function App() {
               <div key={idx} className="flex items-center space-x-0.5 bg-black/40 p-1 rounded border border-neutral-700">
                 {m.tiles.map((t, tidx) => (
                   <div key={tidx}>
-                    {renderMahjongTile(t, {
-                      size: 'sm',
-                      badge: m.fakeTile && tidx === 2 ? `替:${m.fakeTile}` : (m.type === 'angang' ? '暗' : null)
-                    })}
+                    {renderMahjongTile(t, { size: 'sm', badge: m.fakeTile && tidx === 2 ? `替:${m.fakeTile}` : (m.type === 'angang' ? '暗' : null) })}
                   </div>
                 ))}
               </div>
@@ -1977,7 +1862,6 @@ export default function App() {
     );
   };
 
-  // 以本地玩家座位 (mySeatId) 为基准旋转桌面视角：下(自己)、右(下家)、上(对家)、左(上家)
   const bottomPlayer = players[mySeatId];
   const rightPlayer = players[(mySeatId + 1) % 4];
   const topPlayer = players[(mySeatId + 2) % 4];
@@ -2001,7 +1885,6 @@ export default function App() {
         {/* 顶部栏：场地状态 & 对家(Top) */}
         <div className="flex flex-col items-center space-y-2 z-10">
           <div className="w-full flex justify-between items-start">
-            {/* 左上角快捷重选角色与联机房间入口 */}
             <div className="flex flex-col space-y-1.5">
               <button
                 onClick={() => setShowRoleSelectModal(true)}
@@ -2030,7 +1913,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* 对家信息 */}
             {topPlayer && (
               <div className="flex flex-col items-center">
                 {renderPlayerCard(topPlayer)}
@@ -2042,7 +1924,6 @@ export default function App() {
               </div>
             )}
 
-            {/* 右上角全场封锁警示 + 阿姨记牌器开关 */}
             <div className="min-w-[150px] flex flex-col items-end space-y-1.5">
               {bannedSuitInfo ? (
                 <div className="bg-purple-950/90 border-2 border-purple-400 px-3 py-1.5 rounded-xl flex items-center space-x-2 animate-pulse shadow-lg">
@@ -2071,7 +1952,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* 阿姨专属被动《神机妙算》实时记牌器面板 */}
           {bottomPlayer?.role === '阿姨' && showCardCounter && cardCounterMap && (
             <div className="w-full max-w-4xl bg-neutral-950/90 border border-rose-500/50 rounded-2xl p-2.5 shadow-2xl backdrop-blur-md text-[11px]">
               <div className="flex items-center justify-between mb-1.5 pb-1 border-b border-neutral-800">
@@ -2147,8 +2027,6 @@ export default function App() {
 
         {/* 中部区域：左侧(Left) + 中央牌河与30秒倒计时 + 右侧(Right) */}
         <div className="w-full flex justify-between items-center my-2 flex-1">
-          
-          {/* 左侧玩家 */}
           {leftPlayer && (
             <div className="flex items-center space-x-2">
               <div className="flex flex-col space-y-1">
@@ -2160,14 +2038,12 @@ export default function App() {
             </div>
           )}
 
-          {/* 中央牌池与公牌信息 (含30秒出牌倒计时器) */}
           <div className="flex-1 max-w-xl mx-4 bg-black/25 border-2 border-emerald-800/60 rounded-3xl p-4 flex flex-col items-center justify-between min-h-[215px] backdrop-blur-sm shadow-2xl">
             <div className="flex flex-wrap items-center justify-center gap-2.5 text-xs md:text-sm text-emerald-200 font-bold">
               <span>剩余牌山: <strong className="text-yellow-400 text-base">{deck.length}</strong> 张</span>
               <span>|</span>
               <span>当前轮次: <strong className="text-white">{players[turn]?.role}</strong></span>
               <span>|</span>
-              {/* 30秒限时倒计时徽章 + 暂停/开启按钮 */}
               <div className="flex items-center space-x-1">
                 <span
                   className={`px-2.5 py-0.5 rounded-full font-black border flex items-center transition-all ${
@@ -2194,7 +2070,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* 最新打出的一张牌高亮 */}
             <div className="my-3 flex flex-col items-center">
               {lastDiscard ? (
                 <div className="flex flex-col items-center">
@@ -2208,7 +2083,6 @@ export default function App() {
               )}
             </div>
 
-            {/* 四家弃牌河简览 */}
             <div className="w-full grid grid-cols-2 gap-2 text-[11px] border-t border-emerald-800/50 pt-2">
               {players.map(p => (
                 <div key={p.id} className="bg-black/30 px-2 py-1 rounded flex items-center overflow-x-auto whitespace-nowrap">
@@ -2229,7 +2103,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* 右侧玩家 */}
           {rightPlayer && (
             <div className="flex items-center space-x-2">
               {renderPlayerCard(rightPlayer)}
@@ -2246,7 +2119,6 @@ export default function App() {
         {bottomPlayer && (
           <div className="flex flex-col items-center w-full max-w-5xl mx-auto space-y-2.5 z-10">
             
-            {/* 老千打牌后无人中断时，弹出《步步生花》额外抽牌打牌确认栏 */}
             {gamePhase === 'LAOQIAN_EXTRA_PROMPT' && turn === mySeatId && (
               <div className="w-full bg-pink-950/95 border-2 border-pink-400 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2 shadow-2xl animate-pulse">
                 <div className="flex items-center space-x-2">
@@ -2276,7 +2148,6 @@ export default function App() {
               </div>
             )}
 
-            {/* 当别人打牌时：吃 / 碰 / 杠 / 胡 / 技能响应浮层 */}
             {gamePhase === 'REACTION' && pendingReactions && (pendingReactions.responderId === undefined || pendingReactions.responderId === mySeatId) && (
               <div className="w-full bg-amber-950/95 border-2 border-yellow-400 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2 shadow-2xl">
                 <div className="flex flex-col">
@@ -2331,7 +2202,6 @@ export default function App() {
               </div>
             )}
 
-            {/* 自摸被锁死时的醒目提示条 */}
             {turn === mySeatId && gamePhase === 'ACTION' && !humanHuCheck.canHu && humanHuCheck.lockedReason && (
               <div className="w-full bg-red-950/90 border border-red-500 px-3 py-1.5 rounded-xl flex items-center justify-center text-xs text-red-200 shadow">
                 <AlertCircle size={15} className="mr-1.5 text-red-400 shrink-0" />
@@ -2339,13 +2209,10 @@ export default function App() {
               </div>
             )}
 
-            {/* 实时听牌提示器 */}
             {humanTingList.length > 0 && (
               <div className="w-full bg-emerald-950/90 border border-emerald-500/60 px-3 py-1.5 rounded-xl flex flex-wrap items-center justify-between text-xs shadow">
                 <div className="flex items-center space-x-2">
-                  <span className="bg-emerald-500 text-black font-black px-2 py-0.5 rounded text-[11px]">
-                    ⚡ 听牌中
-                  </span>
+                  <span className="bg-emerald-500 text-black font-black px-2 py-0.5 rounded text-[11px]">⚡ 听牌中</span>
                   <span className="text-emerald-200 font-bold">可胡牌面：</span>
                   <div className="flex flex-wrap gap-1.5">
                     {humanTingList.map((item, idx) => (
@@ -2371,11 +2238,9 @@ export default function App() {
               </div>
             )}
 
-            {/* 玩家状态与主动技能按钮栏 */}
             <div className="w-full flex flex-wrap justify-between items-end gap-2 px-2">
               {renderPlayerCard(bottomPlayer)}
 
-              {/* 拔出的实体花牌展示（含灵风自动收入花牌区的北风） */}
               <div className="flex flex-wrap items-center gap-1 bg-black/35 px-3 py-1.5 rounded-xl border border-pink-500/20 max-w-md">
                 <span className="text-xs text-pink-300 mr-1 font-bold">花牌区 ({humanFlowerInfo.total}花):</span>
                 {bottomPlayer.flowerTiles.length === 0 ? (
@@ -2396,7 +2261,6 @@ export default function App() {
                 )}
               </div>
 
-              {/* 角色专属技能与摸牌/理牌控制栏 */}
               <div className="flex flex-wrap items-center gap-2 bg-neutral-900/90 p-2 rounded-xl border border-neutral-700 shadow-xl">
                 <button
                   onClick={handleAutoSortHumanHand}
@@ -2418,7 +2282,6 @@ export default function App() {
                   摸牌 <ChevronRight size={16} className="ml-0.5" />
                 </button>
 
-                {/* 老千专属：千术 + 步步生花额外回合预约 */}
                 {bottomPlayer.role === '老千' && (
                   <>
                     <button
@@ -2450,7 +2313,6 @@ export default function App() {
                   </>
                 )}
 
-                {/* 典当师专属：售罄 */}
                 {bottomPlayer.role === '典当师' && (
                   <button
                     onClick={() => setPawnModal(true)}
@@ -2465,7 +2327,6 @@ export default function App() {
                   </button>
                 )}
 
-                {/* 阿姨专属：闲人免进 (1币) + 风水轮流转 (1币) */}
                 {bottomPlayer.role === '阿姨' && (
                   <>
                     <button
@@ -2497,7 +2358,6 @@ export default function App() {
                   </>
                 )}
 
-                {/* 暗杠 / 明杠选择 */}
                 {humanGangOptions.map(gangTile => (
                   <div key={gangTile} className="flex space-x-1">
                     <button
@@ -2515,7 +2375,6 @@ export default function App() {
                   </div>
                 ))}
 
-                {/* 自摸胡牌按钮 */}
                 {humanHuCheck.canHu && (
                   <button
                     onClick={handleHumanTsumo}
@@ -2527,7 +2386,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* 本机玩家手牌区 */}
             <div className="bg-black/45 p-3 md:p-4 rounded-2xl w-full flex flex-col items-center border border-emerald-800/50 shadow-2xl">
               <div className="flex flex-wrap justify-center gap-1.5 md:gap-2">
                 {bottomPlayer.hand.map((tile, i) => {
@@ -2578,7 +2436,6 @@ export default function App() {
           </button>
         </div>
 
-        {/* 规则与当前角色提示 */}
         <div className="p-3 border-b border-neutral-800 bg-neutral-900/60 text-xs space-y-2 overflow-y-auto max-h-64">
           <div className="font-bold text-gray-200 flex items-center">
             <Info size={14} className="mr-1.5 text-yellow-400" /> 核心规则速览
@@ -2604,7 +2461,6 @@ export default function App() {
           )}
         </div>
 
-        {/* 对局实时日志 */}
         <div className="flex-1 p-3 overflow-y-auto space-y-2 text-xs bg-neutral-950/60">
           {logs.map((log, index) => (
             <div key={index} className="bg-neutral-900/90 border border-neutral-800/80 p-2 rounded-lg text-gray-300 leading-relaxed">
@@ -2615,25 +2471,18 @@ export default function App() {
         </div>
       </div>
 
-      {/* ================== 弹窗 1：开局模式（单机 / 联机房间）、角色与 AI 难度 ================== */}
+      {/* ================== 弹窗 1：开局大厅 ================== */}
       {showRoleSelectModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4 overflow-y-auto">
           <div className="bg-neutral-900 border-2 border-yellow-600/60 rounded-3xl max-w-4xl w-full p-5 md:p-7 shadow-2xl my-auto">
-            <h2 className="text-2xl md:text-3xl font-black text-center text-white mb-1">
-              技能麻将 · 对局大厅
-            </h2>
-            <p className="text-center text-gray-400 text-xs mb-4">
-              支持单机 AI 练习与好友联机房间同台竞技 · 每步 30 秒倒计时
-            </p>
+            <h2 className="text-2xl md:text-3xl font-black text-center text-white mb-1">技能麻将 · 对局大厅</h2>
+            <p className="text-center text-gray-400 text-xs mb-4">支持单机 AI 练习与好友联机房间同台竞技 · 每步 30 秒倒计时</p>
 
-            {/* 模式切换：单机 AI 模式 vs 联机好友房间 */}
             <div className="flex justify-center space-x-3 mb-5">
               <button
                 onClick={() => setGameMode('SINGLE')}
                 className={`px-5 py-2 rounded-xl font-black text-xs md:text-sm flex items-center border-2 transition-all ${
-                  gameMode === 'SINGLE'
-                    ? 'bg-amber-500 text-black border-yellow-300 shadow-lg'
-                    : 'bg-neutral-800 text-gray-300 border-neutral-700 hover:bg-neutral-700'
+                  gameMode === 'SINGLE' ? 'bg-amber-500 text-black border-yellow-300 shadow-lg' : 'bg-neutral-800 text-gray-300 border-neutral-700 hover:bg-neutral-700'
                 }`}
               >
                 <Brain size={16} className="mr-1.5" /> 单机 AI 模式
@@ -2644,273 +2493,131 @@ export default function App() {
                   if (!activeRoomCode) handleCreateOrJoinRoom();
                 }}
                 className={`px-5 py-2 rounded-xl font-black text-xs md:text-sm flex items-center border-2 transition-all ${
-                  gameMode === 'ONLINE'
-                    ? 'bg-cyan-500 text-black border-cyan-300 shadow-lg'
-                    : 'bg-neutral-800 text-gray-300 border-neutral-700 hover:bg-neutral-700'
+                  gameMode === 'ONLINE' ? 'bg-cyan-500 text-black border-cyan-300 shadow-lg' : 'bg-neutral-800 text-gray-300 border-neutral-700 hover:bg-neutral-700'
                 }`}
               >
                 <Globe size={16} className="mr-1.5" /> 联机对战房间 (支持多窗口/好友同玩)
               </button>
             </div>
 
-            {/* 联机大厅房间配置面板 */}
             {gameMode === 'ONLINE' && (
               <div className="bg-neutral-950/90 border-2 border-cyan-500/50 rounded-2xl p-4 mb-5 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs font-bold text-cyan-300">你的昵称:</span>
-                    <input
-                      type="text"
-                      value={playerName}
-                      onChange={(e) => setPlayerName(e.target.value)}
-                      className="bg-neutral-800 border border-neutral-600 rounded-lg px-2.5 py-1 text-xs text-white w-28"
-                      placeholder="输入昵称"
-                    />
+                    <input type="text" value={playerName} onChange={(e) => setPlayerName(e.target.value)} className="bg-neutral-800 border border-neutral-600 rounded-lg px-2.5 py-1 text-xs text-white w-28" placeholder="输入昵称" />
                     <span className="text-xs font-bold text-cyan-300 ml-2">房间号:</span>
-                    <input
-                      type="text"
-                      value={roomCode}
-                      onChange={(e) => setRoomCode(e.target.value.toUpperCase())}
-                      className="bg-neutral-800 border border-cyan-600 rounded-lg px-2.5 py-1 text-xs font-black text-yellow-300 w-24 uppercase"
-                      placeholder="如 8888"
-                    />
-                    <button
-                      onClick={() => handleCreateOrJoinRoom(roomCode)}
-                      className="bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow"
-                    >
-                      创建 / 加入房间
-                    </button>
+                    <input type="text" value={roomCode} onChange={(e) => setRoomCode(e.target.value.toUpperCase())} className="bg-neutral-800 border border-cyan-600 rounded-lg px-2.5 py-1 text-xs font-black text-yellow-300 w-24 uppercase" placeholder="如 8888" />
+                    <button onClick={() => handleCreateOrJoinRoom(roomCode)} className="bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow">创建 / 加入房间</button>
                   </div>
 
                   {activeRoomCode && (
                     <div className="flex items-center space-x-2">
-                      <span className="text-xs text-gray-300">
-                        当前房间: <strong className="text-yellow-400 text-sm">#{activeRoomCode}</strong>
-                      </span>
-                      <button
-                        onClick={() => {
-                          if (navigator.clipboard) {
-                            navigator.clipboard.writeText(activeRoomCode);
-                            setCopySuccess(true);
-                            setTimeout(() => setCopySuccess(false), 2000);
-                          }
-                        }}
-                        className="bg-neutral-800 hover:bg-neutral-700 border border-neutral-600 text-xs px-2.5 py-1 rounded flex items-center text-cyan-300"
-                      >
+                      <span className="text-xs text-gray-300">当前房间: <strong className="text-yellow-400 text-sm">#{activeRoomCode}</strong></span>
+                      <button onClick={() => { if (navigator.clipboard) { navigator.clipboard.writeText(activeRoomCode); setCopySuccess(true); setTimeout(() => setCopySuccess(false), 2000); } }} className="bg-neutral-800 hover:bg-neutral-700 border border-neutral-600 text-xs px-2.5 py-1 rounded flex items-center text-cyan-300">
                         <Copy size={12} className="mr-1" /> {copySuccess ? '已复制' : '复制房号'}
                       </button>
                     </div>
                   )}
                 </div>
 
-                {/* 4个座位实时预览与选座 */}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-2 pt-2">
                   {roomSeats.map((s) => {
                     const isMe = s.seatId === mySeatId;
                     return (
-                      <div
-                        key={s.seatId}
-                        onClick={() => handleSelectOnlineSeat(s.seatId)}
-                        className={`cursor-pointer p-2.5 rounded-xl border transition-all ${
-                          isMe
-                            ? 'bg-cyan-950/70 border-cyan-400 ring-1 ring-cyan-400'
-                            : 'bg-neutral-900 border-neutral-700 hover:border-neutral-500'
-                        }`}
-                      >
+                      <div key={s.seatId} onClick={() => handleSelectOnlineSeat(s.seatId)} className={`cursor-pointer p-2.5 rounded-xl border transition-all ${isMe ? 'bg-cyan-950/70 border-cyan-400 ring-1 ring-cyan-400' : 'bg-neutral-900 border-neutral-700 hover:border-neutral-500'}`}>
                         <div className="flex justify-between items-center text-xs font-bold mb-1">
                           <span className="text-gray-300">{s.seatId + 1}号座</span>
-                          <span className={isMe ? 'text-cyan-300' : s.isAI ? 'text-gray-500' : 'text-emerald-400'}>
-                            {isMe ? '👉 你自己' : s.isAI ? '🤖 AI替补' : '👤 真人玩家'}
-                          </span>
+                          <span className={isMe ? 'text-cyan-300' : s.isAI ? 'text-gray-500' : 'text-emerald-400'}>{isMe ? '👉 你自己' : s.isAI ? '🤖 AI替补' : '👤 真人玩家'}</span>
                         </div>
                         <div className="text-xs font-black text-white truncate">{isMe ? playerName : s.name}</div>
-                        <div className={`text-[11px] font-bold mt-0.5 ${ROLES_INFO[s.role]?.text || 'text-yellow-400'}`}>
-                          角色：{isMe ? selectedHumanRole : s.role}
-                        </div>
+                        <div className={`text-[11px] font-bold mt-0.5 ${ROLES_INFO[s.role]?.text || 'text-yellow-400'}`}>角色：{isMe ? selectedHumanRole : s.role}</div>
                       </div>
                     );
                   })}
                 </div>
-                <p className="text-[11px] text-gray-400">
-                  💡 联机说明：将房间号发给好友（或在本机新开浏览器标签页输入相同房间号）即可加入不同座位，未坐满的空位将由 AI 自动补位！
-                </p>
+                <p className="text-[11px] text-gray-400">💡 联机说明：将房间号发给好友（或在本机新开浏览器标签页输入相同房间号）即可加入不同座位，未坐满的空位将由 AI 自动补位！</p>
               </div>
             )}
 
-            {/* AI 难度选择栏 */}
             <div className="mb-5">
-              <div className="text-xs font-bold text-gray-300 mb-2 flex items-center">
-                <Brain size={14} className="mr-1.5 text-cyan-400" /> 选择 AI 对手难度：
-              </div>
+              <div className="text-xs font-bold text-gray-300 mb-2 flex items-center"><Brain size={14} className="mr-1.5 text-cyan-400" /> 选择 AI 对手难度：</div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
-                {Object.values(AI_DIFFICULTIES).map(diff => {
-                  const isDiffSelected = aiDifficulty === diff.id;
-                  return (
-                    <div
-                      key={diff.id}
-                      onClick={() => setAiDifficulty(diff.id)}
-                      className={`cursor-pointer p-3 rounded-xl border-2 transition-all ${
-                        isDiffSelected
-                          ? `${diff.border} bg-neutral-800 shadow-lg`
-                          : 'border-neutral-800 bg-neutral-950/60 hover:bg-neutral-800/40'
-                      }`}
-                    >
-                      <div className="flex justify-between items-center mb-1">
-                        <span className={`font-black text-sm ${diff.color}`}>{diff.name}</span>
-                        {isDiffSelected && <Check size={15} className="text-yellow-400" />}
-                      </div>
-                      <p className="text-[11px] text-gray-400 leading-relaxed">{diff.desc}</p>
-                    </div>
-                  );
-                })}
+                {Object.values(AI_DIFFICULTIES).map(diff => (
+                  <div key={diff.id} onClick={() => setAiDifficulty(diff.id)} className={`cursor-pointer p-3 rounded-xl border-2 transition-all ${aiDifficulty === diff.id ? `${diff.border} bg-neutral-800 shadow-lg` : 'border-neutral-800 bg-neutral-950/60 hover:bg-neutral-800/40'}`}>
+                    <div className="flex justify-between items-center mb-1"><span className={`font-black text-sm ${diff.color}`}>{diff.name}</span>{aiDifficulty === diff.id && <Check size={15} className="text-yellow-400" />}</div>
+                    <p className="text-[11px] text-gray-400 leading-relaxed">{diff.desc}</p>
+                  </div>
+                ))}
               </div>
             </div>
 
-            {/* 角色选择栏 */}
-            <div className="text-xs font-bold text-gray-300 mb-2 flex items-center">
-              <Users size={14} className="mr-1.5 text-yellow-400" /> 选择你的角色（5选1）：
-            </div>
+            <div className="text-xs font-bold text-gray-300 mb-2 flex items-center"><Users size={14} className="mr-1.5 text-yellow-400" /> 选择你的角色（5选1）：</div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
               {Object.values(ROLES_INFO).map(role => {
                 const isSelected = selectedHumanRole === role.name;
                 return (
-                  <div
-                    key={role.name}
-                    onClick={() => handleChangeRoleInLobby(role.name)}
-                    className={`cursor-pointer rounded-2xl p-3.5 border-2 transition-all ${
-                      isSelected
-                        ? `${role.border} bg-neutral-800 scale-[1.01] shadow-xl`
-                        : 'border-neutral-700 bg-neutral-900/60 hover:bg-neutral-800/50'
-                    }`}
-                  >
+                  <div key={role.name} onClick={() => handleChangeRoleInLobby(role.name)} className={`cursor-pointer rounded-2xl p-3.5 border-2 transition-all ${isSelected ? `${role.border} bg-neutral-800 scale-[1.01] shadow-xl` : 'border-neutral-700 bg-neutral-900/60 hover:bg-neutral-800/50'}`}>
                     <div className="flex justify-between items-center mb-1.5">
-                      <div>
-                        <span className={`text-base font-black ${role.text}`}>{role.name}</span>
-                        <span className="text-xs text-gray-400 ml-2">· {role.title}</span>
-                      </div>
+                      <div><span className={`text-base font-black ${role.text}`}>{role.name}</span><span className="text-xs text-gray-400 ml-2">· {role.title}</span></div>
                       {isSelected && <Check size={18} className="text-yellow-400" />}
                     </div>
-                    <div className="text-xs text-gray-200 mb-1 leading-relaxed">
-                      <span className="bg-yellow-500/20 text-yellow-300 px-1.5 py-0.5 rounded mr-1 font-bold">
-                        {role.activeName}
-                      </span>
-                      {role.activeDesc}
-                    </div>
-                    <div className="text-xs text-gray-400 leading-relaxed">
-                      <span className="bg-pink-500/20 text-pink-300 px-1.5 py-0.5 rounded mr-1 font-bold">
-                        被动·{role.passiveName}
-                      </span>
-                      {role.passiveDesc}
-                    </div>
+                    <div className="text-xs text-gray-200 mb-1 leading-relaxed"><span className="bg-yellow-500/20 text-yellow-300 px-1.5 py-0.5 rounded mr-1 font-bold">{role.activeName}</span>{role.activeDesc}</div>
+                    <div className="text-xs text-gray-400 leading-relaxed"><span className="bg-pink-500/20 text-pink-300 px-1.5 py-0.5 rounded mr-1 font-bold">被动·{role.passiveName}</span>{role.passiveDesc}</div>
                   </div>
                 );
               })}
             </div>
 
             <div className="flex justify-center">
-              <button
-                onClick={() => startNewGame(selectedHumanRole, aiDifficulty)}
-                className="bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black font-black px-8 py-3 rounded-xl text-base shadow-xl"
-              >
-                {gameMode === 'ONLINE'
-                  ? `开始联机房间 #${activeRoomCode} 对局 (座位 ${mySeatId + 1} · ${selectedHumanRole})`
-                  : `以【${selectedHumanRole}】开始单机对局 (${AI_DIFFICULTIES[aiDifficulty].name})`}
+              <button onClick={() => startNewGame(selectedHumanRole, aiDifficulty)} className="bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black font-black px-8 py-3 rounded-xl text-base shadow-xl">
+                {gameMode === 'ONLINE' ? `开始联机房间 #${activeRoomCode} 对局 (座位 ${mySeatId + 1} · ${selectedHumanRole})` : `以【${selectedHumanRole}】开始单机对局 (${AI_DIFFICULTIES[aiDifficulty].name})`}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ================== 弹窗 2：老千《千术》控顶/控底交互 ================== */}
+      {/* ================== 弹窗 2：老千《千术》控牌 ================== */}
       {gamePhase === 'SKILL_MODAL' && qianshuData && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
           <div className="bg-neutral-900 border-2 border-yellow-500 rounded-2xl p-6 max-w-lg w-full shadow-2xl">
-            <div className="flex justify-between items-center mb-1">
-              <h3 className="text-xl font-black text-yellow-400 flex items-center">
-                <Eye className="mr-2" /> 老千 · 千术控牌
-              </h3>
-              <span className="text-xs font-bold text-amber-300">⏱️ {timeLeft}s</span>
-            </div>
-            <p className="text-xs text-gray-400 mb-4">
-              第1步：点击选择 1 张收入手牌（若选花牌将自动补花）：
-            </p>
-
+            <div className="flex justify-between items-center mb-1"><h3 className="text-xl font-black text-yellow-400 flex items-center"><Eye className="mr-2" /> 老千 · 千术控牌</h3><span className="text-xs font-bold text-amber-300">⏱️ {timeLeft}s</span></div>
+            <p className="text-xs text-gray-400 mb-4">第1步：点击选择 1 张收入手牌（若选花牌将自动补花）：</p>
             <div className="flex justify-center space-x-6 mb-6">
               {qianshuData.cards.map((c, idx) => (
                 <div key={idx} className="flex flex-col items-center">
-                  {renderMahjongTile(c, {
-                    size: 'lg',
-                    isSelected: qianshuData.pickedIdx === idx,
-                    onClick: () => {
-                      const otherIndices = [0, 1, 2].filter(i => i !== idx);
-                      setQianshuData({
-                        ...qianshuData,
-                        pickedIdx: idx,
-                        firstPutIdx: otherIndices[0]
-                      });
-                    }
-                  })}
-                  <span className="text-xs mt-2 font-bold text-yellow-300">
-                    {qianshuData.pickedIdx === idx ? '✅ 收入手牌' : '放回牌山'}
-                  </span>
+                  {renderMahjongTile(c, { size: 'lg', isSelected: qianshuData.pickedIdx === idx, onClick: () => { const otherIndices = [0, 1, 2].filter(i => i !== idx); setQianshuData({ ...qianshuData, pickedIdx: idx, firstPutIdx: otherIndices[0] }); }})}
+                  <span className="text-xs mt-2 font-bold text-yellow-300">{qianshuData.pickedIdx === idx ? '✅ 收入手牌' : '放回牌山'}</span>
                 </div>
               ))}
             </div>
-
             <div className="bg-neutral-800 p-3 rounded-xl mb-5 space-y-3 text-xs">
               <div className="flex justify-between items-center">
                 <span className="text-gray-300 font-bold">第2步：其余 2 张放回位置：</span>
                 <div className="flex space-x-2">
-                  <button
-                    onClick={() => setQianshuData({ ...qianshuData, putPosition: 'top' })}
-                    className={`px-3 py-1 rounded font-bold ${qianshuData.putPosition === 'top' ? 'bg-yellow-500 text-black' : 'bg-neutral-700 text-gray-300'}`}
-                  >
-                    放回牌山顶
-                  </button>
-                  <button
-                    onClick={() => setQianshuData({ ...qianshuData, putPosition: 'bottom' })}
-                    className={`px-3 py-1 rounded font-bold ${qianshuData.putPosition === 'bottom' ? 'bg-yellow-500 text-black' : 'bg-neutral-700 text-gray-300'}`}
-                  >
-                    放回牌山底
-                  </button>
+                  <button onClick={() => setQianshuData({ ...qianshuData, putPosition: 'top' })} className={`px-3 py-1 rounded font-bold ${qianshuData.putPosition === 'top' ? 'bg-yellow-500 text-black' : 'bg-neutral-700 text-gray-300'}`}>放回牌山顶</button>
+                  <button onClick={() => setQianshuData({ ...qianshuData, putPosition: 'bottom' })} className={`px-3 py-1 rounded font-bold ${qianshuData.putPosition === 'bottom' ? 'bg-yellow-500 text-black' : 'bg-neutral-700 text-gray-300'}`}>放回牌山底</button>
                 </div>
               </div>
-
               <div className="flex justify-between items-center">
                 <span className="text-gray-300 font-bold">第3步：调整其余 2 张的先后顺序：</span>
-                <button
-                  onClick={() => {
-                    const others = [0, 1, 2].filter(i => i !== qianshuData.pickedIdx);
-                    const nextFirst = qianshuData.firstPutIdx === others[0] ? others[1] : others[0];
-                    setQianshuData({ ...qianshuData, firstPutIdx: nextFirst });
-                  }}
-                  className="bg-neutral-700 hover:bg-neutral-600 px-2.5 py-1 rounded text-yellow-300 font-bold"
-                >
+                <button onClick={() => { const others = [0, 1, 2].filter(i => i !== qianshuData.pickedIdx); const nextFirst = qianshuData.firstPutIdx === others[0] ? others[1] : others[0]; setQianshuData({ ...qianshuData, firstPutIdx: nextFirst }); }} className="bg-neutral-700 hover:bg-neutral-600 px-2.5 py-1 rounded text-yellow-300 font-bold">
                   🔄 互换顺序 ({qianshuData.cards[qianshuData.firstPutIdx]} 在前)
                 </button>
               </div>
             </div>
-
-            <button
-              onClick={handleConfirmQianshu}
-              className="w-full bg-yellow-500 hover:bg-yellow-400 text-black font-black py-2.5 rounded-xl"
-            >
-              确认执行千术
-            </button>
+            <button onClick={handleConfirmQianshu} className="w-full bg-yellow-500 hover:bg-yellow-400 text-black font-black py-2.5 rounded-xl">确认执行千术</button>
           </div>
         </div>
       )}
 
-      {/* ================== 弹窗 3：麦咭《刻意求工》选择废牌充当碰牌 ================== */}
+      {/* ================== 弹窗 3：麦咭《刻意求工》 ================== */}
       {maijiModal && pendingReactions && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
           <div className="bg-neutral-900 border-2 border-cyan-400 rounded-2xl p-6 max-w-xl w-full shadow-2xl">
-            <h3 className="text-xl font-black text-cyan-400 mb-2">
-              🔧 麦咭 · 刻意求工 (消耗1币)
-            </h3>
-            <p className="text-xs text-gray-300 mb-4">
-              你要强行碰出 <strong className="text-yellow-300">【{pendingReactions.discardRecord.tile}】</strong>。系统会自动扣除你手中 1 张【{pendingReactions.discardRecord.tile}】，请从下方其余手牌中点击选择 1 张<strong>废牌</strong>充当第 2 张碰牌材料（碰出后直接轮到你出牌）：
-            </p>
+            <h3 className="text-xl font-black text-cyan-400 mb-2">🔧 麦咭 · 刻意求工 (消耗1币)</h3>
+            <p className="text-xs text-gray-300 mb-4">你要强行碰出 <strong className="text-yellow-300">【{pendingReactions.discardRecord.tile}】</strong>。系统会自动扣除你手中 1 张【{pendingReactions.discardRecord.tile}】，请从下方其余手牌中点击选择 1 张<strong>废牌</strong>充当第 2 张碰牌材料：</p>
             <div className="flex flex-wrap justify-center gap-2 mb-5">
               {bottomPlayer?.hand.map((t, idx) => {
                 const targetTile = pendingReactions.discardRecord.tile;
@@ -2918,63 +2625,39 @@ export default function App() {
                 const isReservedTarget = idx === firstTargetIdx;
                 return (
                   <div key={idx} className="flex flex-col items-center">
-                    {renderMahjongTile(t, {
-                      isDisabled: isReservedTarget,
-                      badge: isReservedTarget ? '配对真牌' : null,
-                      onClick: () => handleConfirmMaijiPeng(idx)
-                    })}
+                    {renderMahjongTile(t, { isDisabled: isReservedTarget, badge: isReservedTarget ? '配对真牌' : null, onClick: () => handleConfirmMaijiPeng(idx) })}
                   </div>
                 );
               })}
             </div>
-            <button
-              onClick={() => setMaijiModal(false)}
-              className="w-full bg-neutral-700 hover:bg-neutral-600 text-gray-200 py-2 rounded-xl font-bold text-xs"
-            >
-              取消
-            </button>
+            <button onClick={() => setMaijiModal(false)} className="w-full bg-neutral-700 hover:bg-neutral-600 text-gray-200 py-2 rounded-xl font-bold text-xs">取消</button>
           </div>
         </div>
       )}
 
-      {/* ================== 弹窗 4：吃牌多组合选择弹窗 ================== */}
+      {/* ================== 弹窗 4：灵风吃牌选择 ================== */}
       {lingfengCombos && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
           <div className="bg-neutral-900 border-2 border-emerald-400 rounded-2xl p-6 max-w-md w-full shadow-2xl">
-            <h3 className="text-lg font-black text-emerald-400 mb-3">
-              选择用于吃【{lingfengCombos.tile}】的手牌搭子：
-            </h3>
+            <h3 className="text-lg font-black text-emerald-400 mb-3">选择用于吃【{lingfengCombos.tile}】的手牌搭子：</h3>
             <div className="space-y-2 mb-4">
               {lingfengCombos.combos.map((combo, idx) => (
-                <button
-                  key={idx}
-                  onClick={() => executeHumanChi(combo, lingfengCombos.tile, lingfengCombos.isSkill)}
-                  className="w-full bg-neutral-800 hover:bg-emerald-900/60 border border-emerald-600/50 p-3 rounded-xl flex items-center justify-center space-x-3 font-bold"
-                >
+                <button key={idx} onClick={() => executeHumanChi(combo, lingfengCombos.tile, lingfengCombos.isSkill)} className="w-full bg-neutral-800 hover:bg-emerald-900/60 border border-emerald-600/50 p-3 rounded-xl flex items-center justify-center space-x-3 font-bold">
                   <span>用【{combo[0]}】+【{combo[1]}】吃【{lingfengCombos.tile}】</span>
                 </button>
               ))}
             </div>
-            <button
-              onClick={() => setLingfengCombos(null)}
-              className="w-full bg-neutral-700 py-2 rounded-xl text-xs font-bold"
-            >
-              取消
-            </button>
+            <button onClick={() => setLingfengCombos(null)} className="w-full bg-neutral-700 py-2 rounded-xl text-xs font-bold">取消</button>
           </div>
         </div>
       )}
 
-      {/* ================== 弹窗 5：典当师《售罄》声明花色 ================== */}
+      {/* ================== 弹窗 5：典当师《售罄》 ================== */}
       {pawnModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
           <div className="bg-neutral-900 border-2 border-purple-500 rounded-2xl p-6 max-w-md w-full shadow-2xl">
-            <h3 className="text-xl font-black text-purple-400 mb-2">
-              🚫 典当师 · 售罄 (消耗1币)
-            </h3>
-            <p className="text-xs text-gray-300 mb-3">
-              声明一种花色，在你的下个回合开始前，全场所有玩家<strong>禁止打出 / 胡 / 作为副露亮出</strong>该花色的牌（除非无其他牌可打）：
-            </p>
+            <h3 className="text-xl font-black text-purple-400 mb-2">🚫 典当师 · 售罄 (消耗1币)</h3>
+            <p className="text-xs text-gray-300 mb-3">声明一种花色，在你的下个回合开始前，全场所有玩家<strong>禁止打出 / 胡 / 作为副露亮出</strong>该花色的牌：</p>
             {bottomPlayer && bottomPlayer.melds.some(m => m.type === 'peng') && humanFlowerInfo.total - 1 < 4 && (
               <div className="bg-amber-950/80 border border-amber-500 text-amber-200 text-[11px] p-2 rounded-lg mb-4">
                 ⚠️ 提醒：你当前已碰牌，消耗 1 枚技能币后你的有效花数将变为 {humanFlowerInfo.total - 1} 花（低于4花解锁线）。
@@ -2982,38 +2665,23 @@ export default function App() {
             )}
             <div className="grid grid-cols-3 gap-3 mb-5">
               {SUITS.map(s => (
-                <button
-                  key={s}
-                  onClick={() => handleConfirmPawnBan(s)}
-                  className="bg-purple-900/60 hover:bg-purple-600 border border-purple-400 py-4 rounded-xl text-lg font-black text-white shadow-lg"
-                >
-                  禁【{s}】
-                </button>
+                <button key={s} onClick={() => handleConfirmPawnBan(s)} className="bg-purple-900/60 hover:bg-purple-600 border border-purple-400 py-4 rounded-xl text-lg font-black text-white shadow-lg">禁【{s}】</button>
               ))}
             </div>
-            <button
-              onClick={() => setPawnModal(false)}
-              className="w-full bg-neutral-700 py-2 rounded-xl text-xs font-bold"
-            >
-              取消
-            </button>
+            <button onClick={() => setPawnModal(false)} className="w-full bg-neutral-700 py-2 rounded-xl text-xs font-bold">取消</button>
           </div>
         </div>
       )}
 
-      {/* ================== 弹窗 6：胡牌结算 / 流局弹窗 ================== */}
+      {/* ================== 弹窗 6：胡牌结算 / 流局 ================== */}
       {(gamePhase === 'WINNER' || gamePhase === 'DRAW_GAME') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4">
           <div className="bg-neutral-900 border-2 border-yellow-500 rounded-3xl p-6 md:p-8 max-w-xl w-full text-center shadow-2xl">
             <Trophy size={48} className="text-yellow-400 mx-auto mb-3" />
             {gamePhase === 'WINNER' && winnerInfo ? (
               <>
-                <h2 className="text-2xl md:text-3xl font-black text-white mb-1">
-                  【{winnerInfo.winner.role}】({winnerInfo.winner.name}) 获胜！
-                </h2>
-                <p className="text-yellow-400 font-bold text-sm mb-4">
-                  胡牌方式：{winnerInfo.winType} · 有效花牌数：{getFlowerBreakdown(winnerInfo.winner).total} 花
-                </p>
+                <h2 className="text-2xl md:text-3xl font-black text-white mb-1">【{winnerInfo.winner.role}】({winnerInfo.winner.name}) 获胜！</h2>
+                <p className="text-yellow-400 font-bold text-sm mb-4">胡牌方式：{winnerInfo.winType} · 有效花牌数：{getFlowerBreakdown(winnerInfo.winner).total} 花</p>
                 <div className="bg-black/40 p-4 rounded-2xl mb-6 flex flex-wrap justify-center gap-1.5">
                   {winnerInfo.winner.melds.map((m, i) => (
                     <div key={i} className="flex space-x-0.5 mr-2 bg-neutral-800 p-1 rounded">
@@ -3033,23 +2701,12 @@ export default function App() {
             )}
 
             <div className="flex justify-center space-x-4">
-              <button
-                onClick={() => startNewGame(selectedHumanRole, aiDifficulty)}
-                className="bg-yellow-500 hover:bg-yellow-400 text-black font-black px-6 py-2.5 rounded-xl"
-              >
-                再来一局
-              </button>
-              <button
-                onClick={() => setShowRoleSelectModal(true)}
-                className="bg-neutral-700 hover:bg-neutral-600 text-white font-bold px-6 py-2.5 rounded-xl"
-              >
-                更换模式 / 角色
-              </button>
+              <button onClick={() => startNewGame(selectedHumanRole, aiDifficulty)} className="bg-yellow-500 hover:bg-yellow-400 text-black font-black px-6 py-2.5 rounded-xl">再来一局</button>
+              <button onClick={() => setShowRoleSelectModal(true)} className="bg-neutral-700 hover:bg-neutral-600 text-white font-bold px-6 py-2.5 rounded-xl">更换模式 / 角色</button>
             </div>
           </div>
         </div>
       )}
-
     </div>
   );
 }
